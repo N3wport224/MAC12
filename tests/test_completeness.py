@@ -148,6 +148,17 @@ class TextTranscriptTests(unittest.TestCase):
         self.assertIn("[9:41 AM] Alex: line one", content)
         self.assertIn("\n                line two", content)
 
+    def test_continuation_lines_line_up_under_the_message(self):
+        conn = sqlite3.connect(str(self.db))
+        conn.execute("UPDATE message SET text = 'first line\nsecond line' WHERE ROWID = 1")
+        conn.commit()
+        conn.close()
+        result = export(self.db, self.temp, filename="align.docx", also_text=True)
+        lines = result.text_path.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, line in enumerate(lines) if "first line" in line)
+        prefix_width = lines[start].index("first line")
+        self.assertEqual(lines[start + 1].index("second line"), prefix_width)
+
     def test_attachment_only_messages_read_inline(self):
         result = export(self.db, self.temp, also_text=True)
         content = result.text_path.read_text(encoding="utf-8")

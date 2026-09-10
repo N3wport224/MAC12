@@ -26,6 +26,10 @@ ProgressCallback = Optional[Callable[[str], None]]
 # Word copes with transcripts this long, but takes its time opening them.
 LARGE_DOCUMENT_MESSAGES = 20000
 
+# How far the plain-text transcript will indent a wrapped line before it gives
+# up and stops trying to align under a very long name.
+MAX_TEXT_INDENT = 32
+
 
 def large_document_note(message_count: int) -> Optional[str]:
     if message_count < LARGE_DOCUMENT_MESSAGES:
@@ -376,7 +380,8 @@ def write_text_transcript(
             message.sender_handle_name or their_name)
         stamp = format_time(message.date) if message.date else "--:--"
         prefix = "[{}] {}: ".format(stamp, speaker)
-        indent = " " * min(len(prefix), 20)
+        # Continuation lines sit under the start of the message text.
+        indent = " " * min(len(prefix), MAX_TEXT_INDENT)
         pieces = []
         for attachment in message.attachments:
             size = format_size(attachment.total_bytes)

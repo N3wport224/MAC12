@@ -182,6 +182,11 @@ class SetupCheckTests(AppTestCase):
         self.assertIn("Not ready yet", args[1])
         self.assertIn("attention", self.window.status_var.get())
 
+    def test_the_progress_bar_is_hidden_when_idle(self):
+        self.assertIn("hidden", self.window.progress.states)
+        self.run_check()
+        self.assertEqual(self.window.progress.states[-1], "hidden")
+
     def test_the_buttons_come_back_after_a_check(self):
         self.run_check()
         self.assertIn(["!disabled"], self.window.check_button.states)

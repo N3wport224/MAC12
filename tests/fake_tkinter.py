@@ -38,7 +38,10 @@ class Widget:
         self.states = []
 
     def grid(self, **kwargs):
-        pass
+        self.states.append("gridded")
+
+    def grid_remove(self):
+        self.states.append("hidden")
 
     def pack(self, **kwargs):
         pass

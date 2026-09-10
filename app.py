@@ -59,6 +59,7 @@ class ExporterApp:
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=18)
         frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, minsize=110, pad=12)
         frame.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
 
@@ -150,6 +151,7 @@ class ExporterApp:
         row += 1
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.grid(row=row, column=0, columnspan=3, sticky="ew")
+        self.progress.grid_remove()
 
         row += 1
         self.status_var = tk.StringVar(value="Ready.")
@@ -206,7 +208,7 @@ class ExporterApp:
         )
 
         self.export_button.state(["disabled"])
-        self.progress.start(12)
+        self._show_progress(True)
         self.status_var.set("Working...")
         self.worker = threading.Thread(
             target=self._run_export, args=(options, self.chosen_path), daemon=True
@@ -218,7 +220,7 @@ class ExporterApp:
         if self.worker and self.worker.is_alive():
             return
         self.check_button.state(["disabled"])
-        self.progress.start(12)
+        self._show_progress(True)
         self.status_var.set("Checking your setup...")
         self.worker = threading.Thread(target=self._run_checks, daemon=True)
         self.worker.start()
@@ -257,8 +259,16 @@ class ExporterApp:
             pass
         self.root.after(100, self._drain_events)
 
+    def _show_progress(self, running: bool) -> None:
+        if running:
+            self.progress.grid()
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+            self.progress.grid_remove()
+
     def _reset(self) -> None:
-        self.progress.stop()
+        self._show_progress(False)
         self.export_button.state(["!disabled"])
         self.check_button.state(["!disabled"])
 
