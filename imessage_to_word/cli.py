@@ -5,16 +5,21 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import chatdb, contacts, phones, preflight
 from .export import (
     ExportError,
     ExportOptions,
     NoMessagesFound,
-    export_to_word,
+    export_loaded,
     format_date_time,
+    gap_note,
     large_document_note,
+    load_conversation,
     parse_date_input,
+    preview_selection,
+    transcript_lines,
 )
 
 
@@ -40,7 +45,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text", action="store_true", help="also save a plain-text copy next to the .docx")
     parser.add_argument("--no-placeholders", action="store_true", help="drop messages that carry no readable text")
     parser.add_argument("--open", action="store_true", help="open the document when it is finished")
+    parser.add_argument(
+        "--preview", nargs="?", type=int, const=DEFAULT_PREVIEW, metavar="N",
+        help="show the conversation instead of exporting it "
+             "(N messages, default {}; use 0 for all)".format(DEFAULT_PREVIEW),
+    )
     return parser
+
+
+DEFAULT_PREVIEW = 40
+
+
+def print_preview(loaded, limit: Optional[int]) -> None:
+    """Show what an export would contain, without writing anything."""
+    head, tail, omitted = preview_selection(loaded.messages, limit)
+    print()
+    for line in loaded.summary_lines("Previewed"):
+        print(line)
+    for line in transcript_lines(head, loaded.their_name, loaded.my_name):
+        print(line)
+    if omitted:
+        print("\n{}\n".format(gap_note(omitted)))
+        for line in transcript_lines(tail, loaded.their_name, loaded.my_name):
+            print(line)
 
 
 def _print_list(db_path, use_contacts: bool = True, limit: int = 40) -> int:
@@ -143,10 +170,28 @@ def main(argv=None) -> int:
             lookup_contact_name=not args.no_contacts,
             link_contact_handles=not args.no_contacts,
         )
-        result = export_to_word(
+        report = lambda message: print(message, file=sys.stderr)  # noqa: E731
+        loaded = load_conversation(options, progress=report)
+
+        if args.preview is not None and not args.interactive:
+            print_preview(loaded, args.preview)
+            print("\nNothing was written. Run it again without --preview to save "
+                  "the Word document.")
+            return 0
+
+        if args.interactive:
+            if _ask_yes_no("Preview the conversation first?", True):
+                print_preview(loaded, args.preview if args.preview is not None
+                              else DEFAULT_PREVIEW)
+            if not _ask_yes_no("\nSave this as a Word document?", True):
+                print("Nothing was written.")
+                return 0
+
+        result = export_loaded(
+            loaded,
             options,
             output_path=Path(args.out) if args.out else None,
-            progress=lambda message: print(message, file=sys.stderr),
+            progress=report,
         )
     except NoMessagesFound as error:
         print(error, file=sys.stderr)

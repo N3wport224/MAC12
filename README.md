@@ -30,6 +30,12 @@ Then find the exact number Messages has for the person:
 python3 -m imessage_to_word --list
 ```
 
+Look at the conversation before writing anything:
+
+```bash
+python3 -m imessage_to_word "+15551234567" --preview
+```
+
 And export:
 
 ```bash
@@ -85,8 +91,12 @@ Fill in:
 | **Also save a plain text copy** | On by default — a `.txt` next to the `.docx` |
 | **Save to** | Defaults to `~/Documents/iMessage Exports/` |
 
-There is also a **Check setup** button, which runs the same checks as
-`--check` and reports back in a dialog.
+**Preview** opens the conversation in a window before anything is written —
+each side in its own colour and on its own side of the page, the same way the
+document lays it out — with the message counts and date range at the top. If it
+is the right conversation, **Export this to Word** writes exactly what you were
+looking at, without reading the database again. **Check setup** runs the same
+checks as `--check` and reports back in a dialog.
 
 ### The command line
 
@@ -98,6 +108,11 @@ python3 -m imessage_to_word --check
 
 # See which handles Messages actually has
 python3 -m imessage_to_word --list
+
+# Look at it first; this writes nothing
+python3 -m imessage_to_word "+1 555 123 4567" --preview        # first 40 messages
+python3 -m imessage_to_word "+1 555 123 4567" --preview 200    # first and last 100
+python3 -m imessage_to_word "+1 555 123 4567" --preview 0      # the whole thing
 
 # Export a conversation, with a plain-text copy, and open it
 python3 -m imessage_to_word "+1 555 123 4567" --name "Alex" --me "Andrew" --text --open
@@ -111,10 +126,23 @@ python3 -m imessage_to_word --interactive
 ```
 
 `python3 -m imessage_to_word --help` lists every option. The less obvious ones:
+`--preview [N]` (show it instead of exporting; `0` shows everything),
 `--text` (also write a `.txt`), `--no-copy` (read the database in place instead
 of copying it — for when disk space is tight), `--no-placeholders` (drop
 messages that carry no readable text), `--no-contacts` (skip the Contacts
 lookup).
+
+Interactive mode offers the preview too, then asks before saving anything.
+
+---
+
+## Previewing first
+
+Nothing is written until you ask for it. `--preview`, and the **Preview**
+button, run exactly the same search the export runs and show you the result —
+so a preview can never disagree with the document you end up with. A long
+history previews as its beginning and its end, with a line saying how many
+messages are in between; the export always includes all of them.
 
 ---
 
@@ -220,7 +248,7 @@ you a quietly incomplete transcript. Quit Messages and run it again.
 ## Layout
 
 ```
-app.py                          the window (Tkinter, ships with macOS Python)
+app.py                          the window and the preview (Tkinter, ships with macOS Python)
 run.command                     double-clickable launcher
 imessage_to_word/
     chatdb.py                   opens chat.db safely, finds handles/chats/messages
@@ -229,10 +257,10 @@ imessage_to_word/
     contacts.py                 optional Contacts lookup (name + linked handles)
     models.py                   Message / Conversation types, Apple-epoch dates
     docx_writer.py              minimal Word (.docx) writer, no dependencies
-    export.py                   builds the document, orchestrates the export
+    export.py                   finds the conversation, builds the document
     cli.py                      command-line interface (incl. --check, --interactive)
     preflight.py                the setup checks behind --check
-tests/                          159 tests, run without a Mac or a real database
+tests/                          179 tests, run without a Mac or a real database
 ```
 
 ## Tests

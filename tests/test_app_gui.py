@@ -151,6 +151,101 @@ class ExportFlowTests(AppTestCase):
         self.assertIn("boom", args[1])
 
 
+class PreviewTests(AppTestCase):
+    """The preview has to show the real conversation and write nothing."""
+
+    def run_preview(self):
+        self.window.start_preview()
+        if self.window.worker:
+            self.window.worker.join(timeout=30)
+        self.window._drain_events()
+        return fake_tkinter.Toplevel.instances[-1] if fake_tkinter.Toplevel.instances else None
+
+    def preview_text(self):
+        window = self.window.preview
+        return window.text.content()
+
+    def setUp(self):
+        super().setUp()
+        self.use_fixture_database()
+        # The preview reads the database itself, so point that at the fixture too.
+        real_load = self.app_module.load_conversation
+
+        def patched(options, progress=None):
+            options.db_path = self.db
+            options.lookup_contact_name = False
+            options.link_contact_handles = False
+            return real_load(options, progress=progress)
+
+        self.app_module.load_conversation = patched
+        self.window.number_var.set("555-123-4567")
+        self.window.their_name_var.set("Alex")
+        self.window.my_name_var.set("Andrew")
+
+    def test_a_preview_window_opens_with_both_speakers(self):
+        self.run_preview()
+        content = self.preview_text()
+        self.assertIn("Alex", content)
+        self.assertIn("Andrew", content)
+        self.assertIn("Hey! Are we still on for dinner at 7?", content)
+        self.assertIn("Tuesday, March 3, 2026", content)
+
+    def test_each_side_is_tagged_differently(self):
+        self.run_preview()
+        tags = self.window.preview.text.tags_used()
+        self.assertIn("name_them", tags)
+        self.assertIn("name_me", tags)
+        self.assertIn("day", tags)
+
+    def test_attachments_and_placeholders_are_shown_as_notes(self):
+        self.run_preview()
+        self.assertIn("Photo: IMG_0042.HEIC", self.preview_text())
+
+    def test_previewing_writes_nothing(self):
+        before = sorted(path.name for path in self.temp.iterdir())
+        self.run_preview()
+        self.assertEqual(sorted(path.name for path in self.temp.iterdir()), before)
+        self.assertIn("Nothing has been written", self.window.status_var.get())
+
+    def test_the_preview_is_read_only(self):
+        self.run_preview()
+        self.assertEqual(self.window.preview.text.options.get("state"), "disabled")
+
+    def test_exporting_from_the_preview_writes_what_was_shown(self):
+        # Export straight from the preview, through the real export path.
+        self.window.chosen_path = self.temp / "gui.docx"
+        self.run_preview()
+        shown = self.preview_text()
+        self.window.preview.export()
+        if self.window.worker:
+            self.window.worker.join(timeout=30)
+        self.window._drain_events()
+        self.assertTrue((self.temp / "gui.docx").exists())
+        self.assertIn("Saved 5 messages", self.window.status_var.get())
+        self.assertTrue(self.window.preview.top.destroyed)
+        # What was previewed is what was written.
+        import zipfile
+        with zipfile.ZipFile(self.temp / "gui.docx") as archive:
+            body = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("dinner at 7", shown)
+        self.assertIn("dinner at 7", body)
+
+    def test_a_long_history_shows_the_start_and_the_end(self):
+        from imessage_to_word.export import preview_selection
+        messages = list(range(1000))
+        head, tail, omitted = preview_selection(messages, 40)
+        self.assertEqual(len(head) + len(tail), 40)
+        self.assertEqual(omitted, 960)
+        self.assertEqual(head[0], 0)
+        self.assertEqual(tail[-1], 999)
+
+    def test_a_bad_number_never_reaches_the_database(self):
+        self.window.number_var.set("x")
+        self.window.start_preview()
+        self.assertIsNone(self.window.worker)
+        self.assertEqual(self.recorder.last()[0], "showwarning")
+
+
 class SetupCheckTests(AppTestCase):
     def run_check(self):
         self.window.start_check()

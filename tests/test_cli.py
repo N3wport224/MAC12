@@ -101,7 +101,8 @@ class NewFlagTests(CliTests):
         self.assertEqual(code, 0)
 
     def test_interactive_mode_asks_for_the_details(self):
-        answers = iter(["555-123-4567", "Alex", "Andrew", "n", "n"])
+        # number, their name, my name, groups?, preview?, save?, open?
+        answers = iter(["555-123-4567", "Alex", "Andrew", "n", "y", "y", "n"])
         target = self.temp / "ask.docx"
         with mock.patch("builtins.input", lambda *args: next(answers)):
             code, out, _ = self.run_cli("--interactive", "--db", str(self.db),
@@ -110,14 +111,60 @@ class NewFlagTests(CliTests):
         self.assertTrue(target.exists())
         self.assertTrue(target.with_suffix(".txt").exists())
         self.assertIn("3 from Alex", out)
+        self.assertIn("dinner at 7", out)   # the preview it was shown
 
     def test_interactive_mode_re_asks_after_a_bad_number(self):
-        answers = iter(["", "y", "555-123-4567", "", "", "n", "n"])
+        answers = iter(["", "y", "555-123-4567", "", "", "n", "n", "y", "n"])
         with mock.patch("builtins.input", lambda *args: next(answers)):
             code, out, _ = self.run_cli("--interactive", "--db", str(self.db),
                                         "--no-contacts", "-o", str(self.temp / "retry.docx"))
         self.assertEqual(code, 0)
         self.assertIn("Enter a phone number", out)
+
+
+class PreviewFlagTests(CliTests):
+    def test_preview_prints_the_conversation_and_writes_nothing(self):
+        target = self.temp / "nope.docx"
+        code, out, _ = self.run_cli("555-123-4567", "--db", str(self.db), "--name", "Alex",
+                                    "--me", "Andrew", "--no-contacts", "--preview",
+                                    "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_suffix(".txt").exists())
+        self.assertIn("Hey! Are we still on for dinner at 7?", out)
+        self.assertIn("[9:41 AM] Alex:", out)
+        self.assertIn("Andrew:", out)
+        self.assertIn("Previewed:", out)
+        self.assertIn("Nothing was written", out)
+
+    def test_preview_takes_a_message_count(self):
+        code, out, _ = self.run_cli("555-123-4567", "--db", str(self.db), "--name", "Alex",
+                                    "--no-contacts", "--preview", "2",
+                                    "-o", str(self.temp / "x.docx"))
+        self.assertEqual(code, 0)
+        shown = [line for line in out.splitlines() if line.startswith("[")]
+        self.assertEqual(len(shown), 2)
+        self.assertIn("not shown here", out)
+        self.assertIn("3 messages not shown", out)
+
+    def test_preview_zero_shows_everything(self):
+        code, out, _ = self.run_cli("555-123-4567", "--db", str(self.db), "--name", "Alex",
+                                    "--no-contacts", "--preview", "0",
+                                    "-o", str(self.temp / "x.docx"))
+        self.assertEqual(code, 0)
+        shown = [line for line in out.splitlines() if line.startswith("[")]
+        self.assertEqual(len(shown), 5)
+        self.assertNotIn("not shown here", out)
+
+    def test_declining_to_save_in_interactive_mode_writes_nothing(self):
+        target = self.temp / "declined.docx"
+        answers = iter(["555-123-4567", "Alex", "Andrew", "n", "y", "n"])
+        with mock.patch("builtins.input", lambda *args: next(answers)):
+            code, out, _ = self.run_cli("--interactive", "--db", str(self.db),
+                                        "--no-contacts", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertFalse(target.exists())
+        self.assertIn("Nothing was written", out)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import chatdb, contacts, phones
 from .docx_writer import INCH, Document, Run, Table
@@ -97,6 +97,10 @@ def format_day(value: datetime) -> str:
     return "{}, {} {}, {}".format(
         value.strftime("%A"), value.strftime("%B"), value.day, value.year
     )
+
+
+def format_short_day(value: datetime) -> str:
+    return "{} {}, {}".format(value.strftime("%b"), value.day, value.year)
 
 
 def format_time(value: datetime) -> str:
@@ -342,14 +346,13 @@ def build_document(
     return document
 
 
-def write_text_transcript(
-    conversation: Conversation, path: Path, their_name: str, my_name: str = "Me"
-) -> Path:
-    """Write the same transcript as plain UTF-8 text.
-
-    Handy for searching, grepping, or pasting somewhere that will not take a
-    Word file -- and a fallback if anything about the .docx ever misbehaves.
-    """
+def transcript_header(
+    conversation: Conversation,
+    their_name: str,
+    my_name: str = "Me",
+    stamp_label: str = "Exported",
+) -> List[str]:
+    """The few summary lines that open a plain-text transcript."""
     lines: List[str] = [
         "iMessage conversation - {} and {}".format(my_name, their_name),
         "=" * 60,
@@ -365,11 +368,18 @@ def write_text_transcript(
         conversation.count_from_me(), my_name))
     if conversation.stats and conversation.stats.rows_seen:
         lines.append("Completeness: {}".format(conversation.stats.summary()))
-    lines.append("Exported: {}".format(format_date_time(datetime.now().astimezone())))
-    lines.append("")
+    lines.append("{}: {}".format(
+        stamp_label, format_date_time(datetime.now().astimezone())))
+    return lines
 
+
+def transcript_lines(
+    messages: Sequence[Message], their_name: str, my_name: str = "Me"
+) -> List[str]:
+    """Render messages as plain text, with a heading each time the day changes."""
+    lines: List[str] = []
     current_day = None
-    for message in conversation.messages:
+    for message in messages:
         day = message.date.date() if message.date else None
         if day != current_day:
             current_day = day
@@ -396,11 +406,45 @@ def write_text_transcript(
             lines.append(indent + line)
         for piece in pieces:
             lines.append(indent + piece)
+    return lines
 
+
+def write_text_transcript(
+    conversation: Conversation, path: Path, their_name: str, my_name: str = "Me"
+) -> Path:
+    """Write the transcript as plain UTF-8 text.
+
+    Handy for searching, grepping, or pasting somewhere that will not take a
+    Word file -- and a fallback if anything about the .docx ever misbehaves.
+    """
+    lines = transcript_header(conversation, their_name, my_name) + [""]
+    lines.extend(transcript_lines(conversation.messages, their_name, my_name))
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def preview_selection(
+    messages: Sequence[Message], limit: Optional[int] = None
+) -> Tuple[List[Message], List[Message], int]:
+    """Split messages into (beginning, end, number left out) for a preview.
+
+    A long history previews as its start and its finish, which is what tells
+    you whether you have the right conversation; the export still gets all of
+    them.
+    """
+    messages = list(messages)
+    if not limit or limit <= 0 or len(messages) <= limit:
+        return messages, [], 0
+    head = limit // 2
+    tail = limit - head
+    return messages[:head], messages[-tail:], len(messages) - limit
+
+
+def gap_note(omitted: int) -> str:
+    return "... {:,} messages not shown here -- all of them are in the export ...".format(
+        omitted)
 
 
 # -- orchestration ---------------------------------------------------------
@@ -414,12 +458,46 @@ def resolve_their_name(options: ExportOptions, contact=None) -> str:
     return phones.format_pretty(options.number)
 
 
-def export_to_word(
-    options: ExportOptions,
-    output_path: Optional[Path] = None,
-    progress: ProgressCallback = None,
-) -> ExportResult:
-    """Read the conversation for ``options.number`` and write it to a .docx."""
+@dataclass
+class LoadedConversation:
+    """Everything gathered for one export, before anything is written.
+
+    The preview and the export both work from one of these, so what you see is
+    exactly what lands in the document.
+    """
+    conversation: Conversation
+    their_name: str
+    my_name: str = "Me"
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def messages(self) -> List[Message]:
+        return self.conversation.messages
+
+    def summary_lines(self, stamp_label: str = "Exported") -> List[str]:
+        return transcript_header(
+            self.conversation, self.their_name, self.my_name, stamp_label)
+
+    def headline(self) -> str:
+        """Who said how much, for a preview window or a status line."""
+        return "{:,} messages ({:,} from {}, {:,} from {})".format(
+            len(self.messages), self.conversation.count_from_them(), self.their_name,
+            self.conversation.count_from_me(), self.my_name)
+
+    def date_span(self) -> str:
+        """The period the conversation covers, kept short enough to fit."""
+        first, last = self.conversation.first_date, self.conversation.last_date
+        if not first or not last:
+            return ""
+        if first.date() == last.date():
+            return format_short_day(first)
+        return "{} - {}".format(format_short_day(first), format_short_day(last))
+
+
+def load_conversation(
+    options: ExportOptions, progress: ProgressCallback = None
+) -> LoadedConversation:
+    """Find every message for ``options.number``, without writing anything."""
     def report(message: str) -> None:
         if progress:
             progress(message)
@@ -482,13 +560,35 @@ def export_to_word(
             if not phones.matches_any(message.sender_handle, person_handles):
                 message.sender_handle_name = phones.format_pretty(message.sender_handle)
 
+    return LoadedConversation(
+        conversation=conversation,
+        their_name=their_name,
+        my_name=options.my_name,
+        warnings=warnings,
+    )
+
+
+def export_loaded(
+    loaded: LoadedConversation,
+    options: ExportOptions,
+    output_path: Optional[Path] = None,
+    progress: ProgressCallback = None,
+) -> ExportResult:
+    """Write an already-loaded conversation out as a Word document."""
+    def report(message: str) -> None:
+        if progress:
+            progress(message)
+
+    conversation = loaded.conversation
+    their_name = loaded.their_name
+
     report("Writing {:,} messages to Word...".format(len(conversation.messages)))
     if output_path:
         destination = as_docx_path(output_path)
     else:
         # Nobody chose a name, so don't quietly replace an earlier export.
         destination = unique_path(default_output_path(their_name))
-    document = build_document(conversation, their_name, options.my_name, progress=progress)
+    document = build_document(conversation, their_name, loaded.my_name, progress=progress)
     report("Saving {}...".format(destination.name))
     document.save(destination)
 
@@ -496,14 +596,14 @@ def export_to_word(
     if options.also_text:
         report("Writing the plain-text copy...")
         text_path = write_text_transcript(
-            conversation, destination.with_suffix(".txt"), their_name, options.my_name
+            conversation, destination.with_suffix(".txt"), their_name, loaded.my_name
         )
 
     return ExportResult(
         path=destination,
         conversation=conversation,
         their_name=their_name,
-        my_name=options.my_name,
+        my_name=loaded.my_name,
         message_count=len(conversation.messages),
         from_me=conversation.count_from_me(),
         from_them=conversation.count_from_them(),
@@ -511,6 +611,16 @@ def export_to_word(
         last_date=conversation.last_date,
         handles=conversation.handles,
         text_path=text_path,
-        warnings=warnings,
+        warnings=list(loaded.warnings),
         stats=conversation.stats,
     )
+
+
+def export_to_word(
+    options: ExportOptions,
+    output_path: Optional[Path] = None,
+    progress: ProgressCallback = None,
+) -> ExportResult:
+    """Read the conversation for ``options.number`` and write it to a .docx."""
+    loaded = load_conversation(options, progress=progress)
+    return export_loaded(loaded, options, output_path=output_path, progress=progress)

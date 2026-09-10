@@ -36,6 +36,9 @@ class Widget:
         self.master = master
         self.options = dict(options)
         self.states = []
+        self.tags = {}
+        self.inserted = []
+        self.destroyed = False
 
     def grid(self, **kwargs):
         self.states.append("gridded")
@@ -68,20 +71,62 @@ class Widget:
             self.states.append(spec)
         return []
 
+    def destroy(self):
+        self.destroyed = True
+
+    def title(self, value=None):
+        self.options["title"] = value
+
+    def geometry(self, value=None):
+        self.options["geometry"] = value
+
+    def transient(self, other=None):
+        pass
+
     def start(self, interval=None):
         self.states.append("started")
 
     def stop(self):
         self.states.append("stopped")
 
+    # Text-widget surface, enough for the preview window.
+    def tag_configure(self, name, **kwargs):
+        self.tags[name] = kwargs
+
+    def insert(self, index, text, tags=()):
+        self.inserted.append((text, tuple(tags)))
+
+    def see(self, index):
+        pass
+
+    def set(self, *args):
+        pass
+
+    def yview(self, *args):
+        pass
+
+    def content(self):
+        """Everything inserted, as one string."""
+        return "".join(text for text, _ in self.inserted)
+
+    def tags_used(self):
+        return {tag for _, tags in self.inserted for tag in tags}
+
+
+class Toplevel(Widget):
+    """A second window; the preview lives in one of these."""
+
+    instances = []
+
+    def __init__(self, master=None, **options):
+        super().__init__(master, **options)
+        Toplevel.instances.append(self)
+
 
 class Tk(Widget):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.scheduled = []
-
-    def title(self, value=None):
-        self.options["title"] = value
 
     def minsize(self, *args):
         pass
@@ -92,9 +137,6 @@ class Tk(Widget):
         return "timer"
 
     def mainloop(self):
-        pass
-
-    def destroy(self):
         pass
 
 
@@ -126,14 +168,16 @@ def install():
     recorder = Recorder()
 
     tkinter = types.ModuleType("tkinter")
-    for name, value in [("Tk", Tk), ("StringVar", StringVar), ("BooleanVar", BooleanVar),
+    Toplevel.instances = []
+    for name, value in [("Tk", Tk), ("Toplevel", Toplevel), ("Text", Widget),
+                        ("StringVar", StringVar), ("BooleanVar", BooleanVar),
                         ("Variable", Variable), ("Frame", Widget), ("Label", Widget),
                         ("Entry", Widget), ("Button", Widget)]:
         setattr(tkinter, name, value)
 
     ttk = types.ModuleType("tkinter.ttk")
     for name in ("Frame", "Label", "Entry", "Button", "Checkbutton", "Progressbar",
-                 "Separator", "Style"):
+                 "Scrollbar", "Separator", "Style"):
         setattr(ttk, name, Widget)
 
     messagebox = types.ModuleType("tkinter.messagebox")
