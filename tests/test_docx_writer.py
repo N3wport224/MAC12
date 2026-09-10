@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -10,6 +12,16 @@ try:
     import docx as python_docx
 except ImportError:  # optional: only used to double-check our output
     python_docx = None
+
+try:
+    import mammoth
+except ImportError:
+    mammoth = None
+
+
+def _pandoc():
+    """pandoc is an entirely separate .docx implementation; use it if present."""
+    return shutil.which("pandoc")
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
@@ -94,6 +106,32 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(
             [cell.text for cell in document.tables[0].rows[0].cells], ["Label", "Value"]
         )
+
+
+class IndependentReaderTests(unittest.TestCase):
+    """Three unrelated implementations should all accept the file Word will get."""
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.path = build_sample(self.temp / "sample.docx")
+
+    @unittest.skipUnless(_pandoc(), "pandoc not installed")
+    def test_pandoc_reads_it_without_warnings(self):
+        completed = subprocess.run(
+            [_pandoc(), "-f", "docx", "-t", "plain", str(self.path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr.strip(), "")
+        self.assertIn("Heading", completed.stdout)
+        self.assertIn("Label", completed.stdout)
+
+    @unittest.skipUnless(mammoth, "mammoth not installed")
+    def test_mammoth_reads_it_without_warnings(self):
+        with open(str(self.path), "rb") as handle:
+            result = mammoth.convert_to_html(handle)
+        self.assertEqual(list(result.messages), [])
+        self.assertIn("Heading", result.value)
 
 
 class RunTests(unittest.TestCase):

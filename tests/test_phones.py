@@ -3,35 +3,47 @@ import unittest
 from imessage_to_word import phones
 
 
-class MatchKeyTests(unittest.TestCase):
+class MatchingTests(unittest.TestCase):
     def test_formatting_is_ignored(self):
         variants = ["5551234567", "555-123-4567", "(555) 123-4567",
                     "+1 555 123 4567", "+15551234567", "1 (555) 123.4567"]
-        keys = {phones.match_key(value) for value in variants}
-        self.assertEqual(keys, {"5551234567"})
+        for value in variants:
+            self.assertTrue(phones.same_handle(value, "+1 (555) 123-4567"), value)
 
-    def test_international_numbers_keep_their_identity(self):
-        self.assertNotEqual(
-            phones.match_key("+447700900123"), phones.match_key("+15551234567")
-        )
+    def test_a_local_seven_digit_number_finds_the_full_one(self):
+        self.assertTrue(phones.same_handle("123-4567", "+15551234567"))
+
+    def test_too_few_digits_never_stands_in_for_a_whole_number(self):
+        self.assertFalse(phones.same_handle("34567", "+15551234567"))
+
+    def test_different_numbers_do_not_match(self):
+        self.assertFalse(phones.same_handle("+447700900123", "+15551234567"))
+        self.assertFalse(phones.same_handle("5551234567", "5551234568"))
 
     def test_emails_compare_case_insensitively(self):
         self.assertTrue(phones.same_handle("Alex@Example.com", "alex@example.com"))
 
-    def test_short_codes_keep_every_digit(self):
-        self.assertEqual(phones.match_key("262966"), "262966")
+    def test_an_email_never_matches_a_number(self):
+        self.assertFalse(phones.same_handle("alex@example.com", "5551234567"))
+
+    def test_short_codes_compare_exactly(self):
+        self.assertTrue(phones.same_handle("262966", "262966"))
         self.assertFalse(phones.same_handle("262966", "12345"))
 
     def test_blank_input_never_matches(self):
-        self.assertEqual(phones.match_key(""), "")
         self.assertFalse(phones.same_handle("", ""))
+        self.assertFalse(phones.same_handle("", "5551234567"))
 
-    def test_match_keys_accepts_one_or_many(self):
-        self.assertEqual(phones.match_keys("555-123-4567"), {"5551234567"})
-        self.assertEqual(
-            phones.match_keys(["555-123-4567", "a@b.com", ""]),
-            {"5551234567", "a@b.com"},
-        )
+    def test_matches_any_accepts_one_or_many(self):
+        self.assertTrue(phones.matches_any("+15551234567", "555-123-4567"))
+        self.assertTrue(phones.matches_any("a@b.com", ["555-123-4567", "A@B.com"]))
+        self.assertFalse(phones.matches_any("+15551234567", []))
+        self.assertFalse(phones.matches_any("+15551234567", ["", None]))
+
+    def test_group_chat_identifiers_are_not_treated_as_numbers(self):
+        self.assertTrue(phones.is_group_identifier("chat618033988749895"))
+        self.assertFalse(phones.is_group_identifier("+15551234567"))
+        self.assertFalse(phones.is_group_identifier("chat@example.com"))
 
 
 class DisplayTests(unittest.TestCase):

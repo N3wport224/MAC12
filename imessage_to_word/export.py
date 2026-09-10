@@ -80,6 +80,7 @@ class ExportResult:
     last_date: Optional[datetime] = None
     handles: List[str] = field(default_factory=list)
     text_path: Optional[Path] = None
+    warnings: List[str] = field(default_factory=list)
     stats: Optional[object] = None
 
     def completeness(self) -> str:
@@ -142,6 +143,26 @@ def default_output_path(name: str) -> Path:
     return folder / "{} - iMessage {}.docx".format(phones.safe_filename(name), stamp)
 
 
+def unique_path(path: Path) -> Path:
+    """Add " (2)", " (3)"... rather than overwrite an earlier export."""
+    path = Path(path)
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = path.with_name("{} ({}){}".format(path.stem, index, path.suffix))
+        if not candidate.exists():
+            return candidate
+    return path
+
+
+def as_docx_path(path) -> Path:
+    """Make sure the destination ends in .docx, so the .txt beside it lines up."""
+    path = Path(path)
+    if path.suffix.lower() != ".docx":
+        path = path.with_name(path.name + ".docx")
+    return path
+
+
 # -- document composition --------------------------------------------------
 
 def _summary_rows(conversation: Conversation, their_name: str, my_name: str):
@@ -173,7 +194,7 @@ def _summary_rows(conversation: Conversation, their_name: str, my_name: str):
     # thread the "chat name" is just the phone number again.
     named_chats = [
         name for name in conversation.chat_names
-        if phones.match_key(name) not in phones.match_keys(conversation.handles)
+        if not phones.matches_any(name, conversation.handles)
     ]
     if named_chats:
         kind = "Conversations" if len(named_chats) > 1 else "Conversation"
@@ -411,8 +432,16 @@ def export_to_word(
     if options.link_contact_handles and contact:
         extra_handles.extend(contact.identifiers)
 
+    warnings: List[str] = []
+
+    def note(message: str) -> None:
+        warnings.append(message)
+        report(message)
+
     report("Opening your Messages database...")
-    with chatdb.open_chat_db(options.db_path, copy=options.copy_database) as conn:
+    with chatdb.open_chat_db(
+        options.db_path, copy=options.copy_database, on_warning=note
+    ) as conn:
         report("Searching for messages with {}...".format(phones.format_pretty(options.number)))
         conversation = chatdb.fetch_conversation(
             conn,
@@ -442,14 +471,18 @@ def export_to_word(
 
     # Attach a per-message speaker label for group chats, where more than one
     # person can be on the "them" side.
-    person_keys = phones.match_keys([options.number] + extra_handles)
+    person_handles = [options.number] + extra_handles
     for message in conversation.messages:
         if message.is_group and not message.is_from_me and message.sender_handle:
-            if phones.match_key(message.sender_handle) not in person_keys:
+            if not phones.matches_any(message.sender_handle, person_handles):
                 message.sender_handle_name = phones.format_pretty(message.sender_handle)
 
     report("Writing {:,} messages to Word...".format(len(conversation.messages)))
-    destination = Path(output_path) if output_path else default_output_path(their_name)
+    if output_path:
+        destination = as_docx_path(output_path)
+    else:
+        # Nobody chose a name, so don't quietly replace an earlier export.
+        destination = unique_path(default_output_path(their_name))
     document = build_document(conversation, their_name, options.my_name, progress=progress)
     report("Saving {}...".format(destination.name))
     document.save(destination)
@@ -473,5 +506,6 @@ def export_to_word(
         last_date=conversation.last_date,
         handles=conversation.handles,
         text_path=text_path,
+        warnings=warnings,
         stats=conversation.stats,
     )

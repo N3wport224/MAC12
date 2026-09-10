@@ -20,7 +20,10 @@ OBJECT_REPLACEMENT = "￼"
 # newlines are kept. Done as a translation table because this runs over every
 # character of every message.
 _ILLEGAL_CHARS = dict.fromkeys(
-    [code for code in range(0x20) if code not in (0x09, 0x0A)] + [0x7F]
+    [code for code in range(0x20) if code not in (0x09, 0x0A)]
+    + [0x7F]
+    + list(range(0xD800, 0xE000))   # unpaired surrogates
+    + [0xFFFE, 0xFFFF]              # not characters, and invalid in XML
 )
 
 

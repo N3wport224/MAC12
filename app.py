@@ -279,6 +279,8 @@ class ExporterApp:
             summary += "\n{}".format(result.text_path)
         if result.completeness():
             summary += "\n\n{}".format(result.completeness())
+        for warning in result.warnings:
+            summary += "\n\nWarning: {}".format(warning)
         note = large_document_note(result.message_count)
         if note:
             summary += "\n\n{}".format(note)

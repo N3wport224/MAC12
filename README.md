@@ -165,9 +165,11 @@ rather than skipped:
 
 ## How it decides what to include
 
-- **Matching the number.** Formatting is ignored: the last 10 digits have to
-  agree (so a number with or without `+1` matches), and email handles match
-  exactly. Short codes match on all their digits.
+- **Matching the number.** Formatting is ignored. Two numbers are the same
+  person when their digits match, or when one is the tail of the other — so
+  `+1 (555) 123-4567`, `5551234567` and even a local `123-4567` all find the
+  same thread. At least seven digits have to agree, so short codes and wrong
+  numbers don't collide. Email handles match exactly, ignoring case.
 - **One person, several handles.** If Contacts has the number, the app also
   pulls that person's other numbers and email addresses from their card, so a
   thread split between an iPhone number and an Apple ID still exports as one
@@ -178,9 +180,14 @@ rather than skipped:
 - **Text that isn't in the `text` column.** Recent macOS versions store message
   bodies in an archived `attributedBody` blob; those are decoded too, so newer
   messages don't come out blank.
-- **Your live database is never touched.** It's copied to a temporary folder
-  (with its write-ahead log, so the newest messages are included), read there,
-  and the copy is deleted afterwards.
+- **Your live database is never touched, and the newest messages still come
+  through.** Messages keeps its database in WAL mode, which means recent
+  messages live in a `chat.db-wal` sidecar rather than in `chat.db` itself. The
+  app snapshots the database with SQLite's own backup API, which takes a proper
+  read lock and includes that sidecar. If Messages has the file locked, it
+  falls back to copying the files (and gives up rather than hanging). Reading
+  in place with `--no-copy` sees the sidecar too — and says so plainly if it
+  ever has to fall back to a read that cannot.
 
 ---
 
@@ -196,8 +203,14 @@ the number with and without the country code, turning on group chats, and
 widening the date range.
 
 **Some messages look blank or missing** — messages whose only content was an
-attachment show as an attachment line; messages you deleted are gone from the
-database and can't be recovered by this app.
+attachment show as an attachment line, and ones with no text at all show as
+`[Link]`, `[Audio message]` and so on. Messages you deleted are gone from the
+database and can't be recovered by this app. Anything the app couldn't read is
+counted in the Completeness line rather than dropped quietly.
+
+**A warning about missing messages** — if the app ever has to fall back to a
+read that can't see Messages' write-ahead log, it says so instead of handing
+you a quietly incomplete transcript. Quit Messages and run it again.
 
 **Nothing at all in the list** — the history isn't on this Mac yet. Check
 "Messages in iCloud" has finished syncing.
@@ -219,7 +232,7 @@ imessage_to_word/
     export.py                   builds the document, orchestrates the export
     cli.py                      command-line interface (incl. --check, --interactive)
     preflight.py                the setup checks behind --check
-tests/                          119 tests, run without a Mac or a real database
+tests/                          159 tests, run without a Mac or a real database
 ```
 
 ## Tests
@@ -231,6 +244,13 @@ python3 -m unittest discover -s tests -t .
 The suite builds miniature `chat.db` files with the real Messages schema —
 a normal thread, a 2013-era one, one full of awkward untexted messages, and a
 4,000-message one — so the whole path (matching, decoding, filtering, document
-generation, the window's own logic) is covered without touching your own data. Installing `python-docx` (`pip3 install
+generation, the window's own logic) is covered without touching your own data.
+It also covers the awkward realities: a database in WAL mode with messages not
+yet written to `chat.db`, one locked by Messages, a corrupt one, a row of
+invalid UTF-8, paths with spaces, and daylight-saving boundaries.
+
+Installing any of `python-docx`, `mammoth` or `pandoc` enables extra checks
+that three unrelated Word implementations can read the generated file; without
+them those are skipped. Installing `python-docx` (`pip3 install
 python-docx`) enables a few extra checks that a Word library can read the
 generated file; without it those are skipped.

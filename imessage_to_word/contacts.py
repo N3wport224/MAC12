@@ -52,7 +52,7 @@ def _full_name(row) -> str:
     return " ".join(part for part in parts if part) or (row["org"] or "").strip()
 
 
-def _search_database(path: Path, key: str) -> Optional[ContactMatch]:
+def _search_database(path: Path, handle: str) -> Optional[ContactMatch]:
     temp_dir = tempfile.mkdtemp(prefix="imessage-contacts-")
     try:
         working = Path(temp_dir) / path.name
@@ -69,7 +69,7 @@ def _search_database(path: Path, key: str) -> Optional[ContactMatch]:
             owner = None
             match = ContactMatch()
             for row in rows:
-                if phones.match_key(row["value"] or "") == key:
+                if phones.same_handle(row["value"] or "", handle):
                     owner = row["pk"]
                     match.name = match.name or _full_name(row)
                     break
@@ -92,11 +92,10 @@ def _search_database(path: Path, key: str) -> Optional[ContactMatch]:
 
 def find_contact(handle: str) -> Optional[ContactMatch]:
     """Look up the Contacts card for a phone number or email address."""
-    key = phones.match_key(handle)
-    if not key:
+    if not (handle or "").strip():
         return None
     for database in candidate_databases():
-        match = _search_database(database, key)
+        match = _search_database(database, handle)
         if match:
             return match
     return None

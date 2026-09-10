@@ -59,11 +59,15 @@ def _print_list(db_path, use_contacts: bool = True, limit: int = 40) -> int:
     return 0
 
 
+class _Cancelled(Exception):
+    """The person pressed Ctrl-C, or there is no one there to answer."""
+
+
 def _ask(prompt: str, default: str = "") -> str:
     try:
         answer = input(prompt).strip()
-    except EOFError:
-        return default
+    except (EOFError, KeyboardInterrupt):
+        raise _Cancelled()
     return answer or default
 
 
@@ -76,6 +80,14 @@ def _ask_yes_no(prompt: str, default: bool = False) -> bool:
 
 def interactive(args) -> int:
     """A question-and-answer version of the app, for when there is no window."""
+    try:
+        return _interactive(args)
+    except _Cancelled:
+        print("\nCancelled.")
+        return 1
+
+
+def _interactive(args) -> int:
     print("Save an iMessage conversation as a Word document")
     print("-" * 48)
     number = ""
@@ -142,6 +154,9 @@ def main(argv=None) -> int:
     except (ExportError, chatdb.ChatDBError) as error:
         print("Error: {}".format(error), file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
 
     print("\nSaved {}".format(result.path))
     if result.text_path:
@@ -156,12 +171,17 @@ def main(argv=None) -> int:
         ))
     if result.completeness():
         print("  {}".format(result.completeness()))
+    for warning in result.warnings:
+        print("\nWarning: {}".format(warning))
     note = large_document_note(result.message_count)
     if note:
         print("\n{}".format(note))
 
     if args.interactive and not args.open:
-        args.open = _ask_yes_no("Open the document now?", True)
+        try:
+            args.open = _ask_yes_no("Open the document now?", True)
+        except _Cancelled:
+            args.open = False
 
     if args.open:
         try:

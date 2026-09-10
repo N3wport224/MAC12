@@ -4,11 +4,12 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import time
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from . import phones
 from .attributed_body import clean_text, decode_attributed_body
@@ -71,43 +72,136 @@ def check_access(path: Path) -> None:
         raise ChatDBError("Could not read {}: {}".format(path, exc))
 
 
-@contextmanager
-def open_chat_db(path: Optional[Path] = None, copy: bool = True) -> Iterator[sqlite3.Connection]:
-    """Open chat.db for reading.
+WAL_WARNING = (
+    "Could not read the write-ahead log, so messages Messages has not yet "
+    "written into chat.db may be missing from this export. Quit Messages and "
+    "run it again, or drop --no-copy so the database is snapshotted instead."
+)
 
-    By default the database is copied to a temporary directory first: Messages
-    keeps a write-ahead log open, and copying (with its -wal/-shm sidecars)
-    gives a consistent snapshot that includes the newest messages without
-    touching the live file.
+
+def _uri(path: Path, query: str) -> str:
+    """A SQLite file: URI that survives spaces and other characters in a path."""
+    return "{}?{}".format(path.as_uri(), query)
+
+
+class SnapshotStalled(Exception):
+    """The backup made no progress for a while -- something else holds a lock."""
+
+
+def _snapshot(path: Path, working: Path, stall_seconds: float = 10.0) -> None:
+    """Copy the live database into ``working`` using SQLite's backup API.
+
+    This takes a proper read lock, so the copy is consistent and -- unlike
+    copying the file by hand -- it always includes whatever is still sitting in
+    the write-ahead log, which is where the newest messages live while Messages
+    is running.
+
+    SQLite retries a locked source forever, so a watchdog gives up if the copy
+    stops making progress; the caller then falls back to copying the file.
+    """
+    state = {"remaining": None, "changed": time.monotonic()}
+
+    def watchdog(status, remaining, total):
+        now = time.monotonic()
+        if remaining != state["remaining"]:
+            state["remaining"] = remaining
+            state["changed"] = now
+        elif now - state["changed"] > stall_seconds:
+            raise SnapshotStalled(
+                "the Messages database stayed locked for {:.0f} seconds".format(
+                    stall_seconds))
+
+    source = sqlite3.connect(_uri(path, "mode=ro"), uri=True)
+    try:
+        # Fail fast if something already holds the database, rather than
+        # spending the whole watchdog budget discovering it.
+        source.execute("PRAGMA busy_timeout = 2000")
+        source.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        destination = sqlite3.connect(str(working))
+        try:
+            source.backup(destination, pages=2048, progress=watchdog, sleep=0.1)
+        finally:
+            destination.close()
+    finally:
+        source.close()
+
+
+def _copy_files(path: Path, working: Path) -> None:
+    """Fallback snapshot: copy chat.db and its -wal/-shm sidecars."""
+    shutil.copyfile(path, working)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            try:
+                shutil.copyfile(sidecar, Path(str(working) + suffix))
+            except OSError:
+                pass  # A missing sidecar just means slightly older data.
+
+
+def _has_pending_wal(path: Path) -> bool:
+    wal = Path(str(path) + "-wal")
+    try:
+        return wal.exists() and wal.stat().st_size > 0
+    except OSError:
+        return False
+
+
+@contextmanager
+def open_chat_db(
+    path: Optional[Path] = None,
+    copy: bool = True,
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> Iterator[sqlite3.Connection]:
+    """Open chat.db for reading, without disturbing Messages.
+
+    By default the database is snapshotted into a temporary folder first, which
+    keeps the live file untouched and captures the messages that are still in
+    the write-ahead log.  ``copy=False`` reads it in place instead.
     """
     path = Path(path) if path else DEFAULT_DB_PATH
     check_access(path)
 
-    read_only_uri = "file:{}?mode=ro&immutable=1".format(path)
+    def warn(message: str) -> None:
+        if on_warning:
+            on_warning(message)
+
     temp_dir = None
     connection = None
     try:
         if copy:
+            temp_dir = tempfile.mkdtemp(prefix="imessage-export-")
+            working = Path(temp_dir) / "chat.db"
             try:
-                temp_dir = tempfile.mkdtemp(prefix="imessage-export-")
-                working = Path(temp_dir) / "chat.db"
-                shutil.copyfile(path, working)
-                for suffix in ("-wal", "-shm"):
-                    sidecar = Path(str(path) + suffix)
-                    if sidecar.exists():
-                        try:
-                            shutil.copyfile(sidecar, Path(str(working) + suffix))
-                        except OSError:
-                            pass  # A missing sidecar just means slightly older data.
+                _snapshot(path, working)
+            except (sqlite3.Error, OSError, AttributeError, SnapshotStalled):
+                # Older Python, or a database SQLite will not open read-only:
+                # fall back to copying the files themselves.
+                for leftover in Path(temp_dir).glob("chat.db*"):
+                    leftover.unlink()
+                try:
+                    _copy_files(path, working)
+                except OSError:
+                    # Usually not enough room; read it in place instead.
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir = None
+            if temp_dir:
                 connection = sqlite3.connect(str(working))
-            except OSError:
-                # Usually not enough room for the copy; read it in place instead.
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                temp_dir = None
-                connection = sqlite3.connect(read_only_uri, uri=True)
-        else:
-            connection = sqlite3.connect(read_only_uri, uri=True)
+
+        if connection is None:
+            # Reading in place: mode=ro can still see the write-ahead log,
+            # immutable cannot, so only fall back to it if we have to.
+            try:
+                connection = sqlite3.connect(_uri(path, "mode=ro"), uri=True)
+                connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            except sqlite3.Error:
+                if connection is not None:
+                    connection.close()
+                connection = sqlite3.connect(_uri(path, "mode=ro&immutable=1"), uri=True)
+                if _has_pending_wal(path):
+                    warn(WAL_WARNING)
         connection.row_factory = sqlite3.Row
+        # One row of invalid UTF-8 would otherwise abort the whole export.
+        connection.text_factory = lambda raw: raw.decode("utf-8", "replace")
     except sqlite3.OperationalError as exc:
         if "unable to open database" in str(exc).lower():
             raise ChatDBPermissionError(FULL_DISK_ACCESS_HELP)
@@ -124,6 +218,15 @@ def open_chat_db(path: Optional[Path] = None, copy: bool = True) -> Iterator[sql
 
     try:
         yield connection
+    except sqlite3.DatabaseError as exc:
+        message = str(exc).lower()
+        if "malformed" in message or "not a database" in message:
+            raise ChatDBError(
+                "The copy of the Messages database came out unreadable, which "
+                "usually means Messages was writing to it at the time.\n\n"
+                "Quit Messages and run this again."
+            )
+        raise ChatDBError("Error reading the Messages database: {}".format(exc))
     finally:
         connection.close()
         if temp_dir:
@@ -143,12 +246,12 @@ def find_handles(conn: sqlite3.Connection, targets) -> List[sqlite3.Row]:
     ``targets`` may be a single number/email or several of them -- one person
     often texts from both a phone number and an Apple ID address.
     """
-    keys = phones.match_keys(targets)
-    if not keys:
+    if not any((target or "").strip() for target in
+               ([targets] if isinstance(targets, str) else targets or [])):
         return []
     matches = []
     for row in conn.execute("SELECT ROWID, id, service FROM handle"):
-        if phones.match_key(row["id"]) in keys:
+        if phones.matches_any(row["id"], targets):
             matches.append(row)
     return matches
 
@@ -172,7 +275,6 @@ def find_chats(
     handles.  Group chats are only included when asked for.
     """
     participants = _chat_participants(conn)
-    keys = phones.match_keys(targets)
     chats: Dict[int, sqlite3.Row] = {}
     selected: List[int] = []
 
@@ -181,7 +283,11 @@ def find_chats(
     ):
         chat_id = row["ROWID"]
         members = participants.get(chat_id, set())
-        identifier_matches = phones.match_key(row["chat_identifier"] or "") in keys
+        identifier = row["chat_identifier"] or ""
+        identifier_matches = (
+            not phones.is_group_identifier(identifier)
+            and phones.matches_any(identifier, targets)
+        )
         involves_person = bool(members & handle_ids) or identifier_matches
         # Messages marks one-to-one threads with style 45; trust that when it
         # is there, and fall back to "every participant is this person".
@@ -207,7 +313,8 @@ def _chat_label(row: Optional[sqlite3.Row], fallback: str) -> str:
 def _load_attachments(
     conn: sqlite3.Connection, message_ids: Sequence[int]
 ) -> Dict[int, List[Attachment]]:
-    if not message_ids or "attachment" not in _table_names(conn):
+    tables = _table_names(conn)
+    if not message_ids or not {"attachment", "message_attachment_join"} <= tables:
         return {}
     columns = _columns(conn, "attachment")
     name_column = "transfer_name" if "transfer_name" in columns else "filename"
@@ -324,6 +431,9 @@ def fetch_messages(
     stats: Optional[FetchStats] = None,
 ) -> List[Message]:
     stats = stats if stats is not None else FetchStats()
+    # Message timestamps are local-time aware; make sure the bounds are too.
+    start = start.astimezone() if start and start.tzinfo is None else start
+    end = end.astimezone() if end and end.tzinfo is None else end
     select = _message_select(conn)
     rows: Dict[int, Tuple[sqlite3.Row, Optional[int]]] = {}
 
