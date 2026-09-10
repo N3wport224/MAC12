@@ -25,13 +25,14 @@ except ImportError:  # pragma: no cover - depends on the Python install
     )
     raise SystemExit(1)
 
-from imessage_to_word import chatdb, phones
+from imessage_to_word import chatdb, phones, preflight
 from imessage_to_word.export import (
     ExportError,
     ExportOptions,
     NoMessagesFound,
     default_output_path,
     export_to_word,
+    large_document_note,
     parse_date_input,
 )
 
@@ -123,6 +124,9 @@ class ExporterApp:
                         variable=self.groups_var).pack(anchor="w")
         ttk.Checkbutton(options, text="Include tapbacks (Loved, Liked, ...)",
                         variable=self.reactions_var).pack(anchor="w")
+        self.text_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options, text="Also save a plain text (.txt) copy",
+                        variable=self.text_var).pack(anchor="w")
 
         row += 1
         ttk.Label(frame, text="Save to").grid(row=row, column=0, sticky="w", pady=(12, 4))
@@ -133,8 +137,14 @@ class ExporterApp:
             row=row, column=2, sticky="e", padx=(8, 0), pady=(12, 4))
 
         row += 1
-        self.export_button = ttk.Button(frame, text="Export to Word", command=self.start_export)
-        self.export_button.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(18, 6))
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(18, 6))
+        self.export_button = ttk.Button(buttons, text="Export to Word",
+                                        command=self.start_export)
+        self.export_button.pack(side="left", expand=True, fill="x")
+        self.check_button = ttk.Button(buttons, text="Check setup",
+                                       command=self.start_check)
+        self.check_button.pack(side="left", padx=(10, 0))
         self.root.bind("<Return>", lambda _event: self.start_export())
 
         row += 1
@@ -190,6 +200,7 @@ class ExporterApp:
             my_name=self.my_name_var.get().strip() or "Me",
             include_groups=self.groups_var.get(),
             include_reactions=self.reactions_var.get(),
+            also_text=self.text_var.get(),
             start=start,
             end=end,
         )
@@ -201,6 +212,22 @@ class ExporterApp:
             target=self._run_export, args=(options, self.chosen_path), daemon=True
         )
         self.worker.start()
+
+    def start_check(self) -> None:
+        """Confirm this Mac is set up (Full Disk Access, history, save folder)."""
+        if self.worker and self.worker.is_alive():
+            return
+        self.check_button.state(["disabled"])
+        self.progress.start(12)
+        self.status_var.set("Checking your setup...")
+        self.worker = threading.Thread(target=self._run_checks, daemon=True)
+        self.worker.start()
+
+    def _run_checks(self) -> None:
+        try:
+            self.events.put(("checks", preflight.report(preflight.run_checks())))
+        except Exception as error:  # pragma: no cover - defensive
+            self.events.put(("error", error))
 
     def _run_export(self, options: ExportOptions, output_path) -> None:
         try:
@@ -222,6 +249,8 @@ class ExporterApp:
                     self.status_var.set(payload)
                 elif kind == "done":
                     self._finish_success(payload)
+                elif kind == "checks":
+                    self._finish_checks(payload)
                 elif kind == "error":
                     self._finish_error(payload)
         except queue.Empty:
@@ -231,6 +260,14 @@ class ExporterApp:
     def _reset(self) -> None:
         self.progress.stop()
         self.export_button.state(["!disabled"])
+        self.check_button.state(["!disabled"])
+
+    def _finish_checks(self, text: str) -> None:
+        self._reset()
+        ready = "Not ready yet" not in text
+        self.status_var.set("Setup looks good." if ready else "Setup needs attention.")
+        show = messagebox.showinfo if ready else messagebox.showwarning
+        show("Setup check", text, parent=self.root)
 
     def _finish_success(self, result) -> None:
         self._reset()
@@ -238,6 +275,13 @@ class ExporterApp:
             result.message_count, result.from_them, result.their_name,
             result.from_me, result.my_name, result.path,
         )
+        if result.text_path:
+            summary += "\n{}".format(result.text_path)
+        if result.completeness():
+            summary += "\n\n{}".format(result.completeness())
+        note = large_document_note(result.message_count)
+        if note:
+            summary += "\n\n{}".format(note)
         self.status_var.set(summary)
         if messagebox.askyesno("Export finished", summary + "\n\nOpen it now?",
                                parent=self.root):

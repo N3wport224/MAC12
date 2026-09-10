@@ -20,8 +20,11 @@ class AppTestCase(unittest.TestCase):
         self.window = self.app_module.ExporterApp(self.root)
         self.temp = Path(tempfile.mkdtemp())
         self.db = build_sample_db(self.temp / "chat.db")
+        # Tests below swap this out; put it back so nothing leaks between them.
+        self.real_run_checks = self.app_module.preflight.run_checks
 
     def tearDown(self):
+        self.app_module.preflight.run_checks = self.real_run_checks
         sys.modules.pop("app", None)
         if not self.had_real_tkinter:
             fake_tkinter.uninstall()
@@ -113,6 +116,29 @@ class ExportFlowTests(AppTestCase):
         self.assertEqual(name, "showinfo")
         self.assertIn("No messages found", args[1])
 
+    def test_the_plain_text_option_reaches_the_exporter(self):
+        captured = {}
+
+        def capture(options, output_path=None, progress=None):
+            captured["also_text"] = options.also_text
+            raise RuntimeError("stop here")
+
+        self.app_module.export_to_word = capture
+        self.window.number_var.set("555-123-4567")
+        self.window.text_var.set(True)
+        self.run_export()
+        self.assertTrue(captured["also_text"])
+
+    def test_the_success_message_includes_the_text_file_and_completeness(self):
+        self.use_fixture_database()
+        self.window.number_var.set("555-123-4567")
+        self.window.their_name_var.set("Alex")
+        self.window.text_var.set(True)
+        self.run_export()
+        status = self.window.status_var.get()
+        self.assertIn(".txt", status)
+        self.assertIn("messages exported", status)
+
     def test_unexpected_errors_are_surfaced_not_swallowed(self):
         def explode(options, output_path=None, progress=None):
             raise ValueError("boom")
@@ -123,6 +149,43 @@ class ExportFlowTests(AppTestCase):
         name, args, _ = self.recorder.last()
         self.assertEqual(name, "showerror")
         self.assertIn("boom", args[1])
+
+
+class SetupCheckTests(AppTestCase):
+    def run_check(self):
+        self.window.start_check()
+        if self.window.worker:
+            self.window.worker.join(timeout=30)
+        self.window._drain_events()
+
+    def test_a_good_setup_is_shown_as_information(self):
+        from imessage_to_word import preflight
+
+        self.app_module.preflight.run_checks = lambda *a, **k: [
+            preflight.Check("Full Disk Access", preflight.OK, "readable")
+        ]
+        self.run_check()
+        name, args, _ = self.recorder.last()
+        self.assertEqual(name, "showinfo")
+        self.assertIn("Ready.", args[1])
+        self.assertEqual(self.window.status_var.get(), "Setup looks good.")
+
+    def test_a_blocked_setup_is_shown_as_a_warning(self):
+        from imessage_to_word import preflight
+
+        self.app_module.preflight.run_checks = lambda *a, **k: [
+            preflight.Check("Full Disk Access", preflight.FAIL, "blocked by macOS")
+        ]
+        self.run_check()
+        name, args, _ = self.recorder.last()
+        self.assertEqual(name, "showwarning")
+        self.assertIn("Not ready yet", args[1])
+        self.assertIn("attention", self.window.status_var.get())
+
+    def test_the_buttons_come_back_after_a_check(self):
+        self.run_check()
+        self.assertIn(["!disabled"], self.window.check_button.states)
+        self.assertIn("stopped", self.window.progress.states)
 
 
 if __name__ == "__main__":

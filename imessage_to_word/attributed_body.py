@@ -16,6 +16,13 @@ _VALUE_MARKER = b"\x01+"
 # Object-replacement character; iMessage uses it as an attachment placeholder.
 OBJECT_REPLACEMENT = "￼"
 
+# Control characters that are illegal in XML (and so in .docx). Tabs and
+# newlines are kept. Done as a translation table because this runs over every
+# character of every message.
+_ILLEGAL_CHARS = dict.fromkeys(
+    [code for code in range(0x20) if code not in (0x09, 0x0A)] + [0x7F]
+)
+
 
 def _read_length(data: bytes, index: int) -> Optional[Tuple[int, int]]:
     """Read a typedstream length prefix. Returns (length, next_index)."""
@@ -85,10 +92,6 @@ def clean_text(text: Optional[str]) -> str:
     # listed separately, so drop the placeholder rather than show a tofu box.
     text = text.replace(OBJECT_REPLACEMENT, " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Strip control characters that are illegal in XML (and so in .docx).
-    text = "".join(
-        ch for ch in text
-        if ch in "\n\t" or (ord(ch) >= 0x20 and ord(ch) != 0x7F)
-    )
+    text = text.translate(_ILLEGAL_CHARS)
     lines = [line.rstrip() for line in text.split("\n")]
     return "\n".join(lines).strip()

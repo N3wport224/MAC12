@@ -36,7 +36,7 @@ class ContactMatch:
     identifiers: List[str] = field(default_factory=list)
 
 
-def _candidate_databases() -> List[Path]:
+def candidate_databases() -> List[Path]:
     candidates = [ADDRESS_BOOK_DIR / "AddressBook-v22.abcddb"]
     sources = ADDRESS_BOOK_DIR / "Sources"
     if sources.is_dir():
@@ -95,7 +95,7 @@ def find_contact(handle: str) -> Optional[ContactMatch]:
     key = phones.match_key(handle)
     if not key:
         return None
-    for database in _candidate_databases():
+    for database in candidate_databases():
         match = _search_database(database, key)
         if match:
             return match

@@ -47,6 +47,38 @@ class Attachment:
 
 
 @dataclass
+class FetchStats:
+    """A tally of what happened to every message row we looked at.
+
+    The point is to be able to say "1,203 of 1,203 messages exported" rather
+    than hoping nothing fell through a filter.
+    """
+    rows_seen: int = 0
+    exported: int = 0
+    reactions_skipped: int = 0
+    outside_date_range: int = 0
+    placeholders: int = 0
+    unreadable_bodies: int = 0
+
+    @property
+    def accounted_for(self) -> int:
+        return self.exported + self.reactions_skipped + self.outside_date_range
+
+    def summary(self) -> str:
+        parts = ["{:,} of {:,} messages exported".format(self.exported, self.rows_seen)]
+        if self.reactions_skipped:
+            parts.append("{:,} {} left out".format(
+                self.reactions_skipped,
+                "tapback" if self.reactions_skipped == 1 else "tapbacks",
+            ))
+        if self.outside_date_range:
+            parts.append("{:,} outside the date range".format(self.outside_date_range))
+        if self.placeholders:
+            parts.append("{:,} had no readable text".format(self.placeholders))
+        return "; ".join(parts)
+
+
+@dataclass
 class Message:
     rowid: int
     date: Optional[datetime]
@@ -61,6 +93,9 @@ class Message:
     is_group: bool = False
     is_reaction: bool = False
     is_edited: bool = False
+    # True when the row carried no readable text and we substituted a note
+    # such as "[Link preview]" rather than dropping the message.
+    is_placeholder: bool = False
     attachments: List[Attachment] = field(default_factory=list)
 
     @property
@@ -77,6 +112,7 @@ class Conversation:
     messages: List[Message] = field(default_factory=list)
     chat_names: List[str] = field(default_factory=list)
     included_group_chats: bool = False
+    stats: "FetchStats" = field(default_factory=lambda: FetchStats())
 
     @property
     def first_date(self) -> Optional[datetime]:

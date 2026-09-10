@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from imessage_to_word.cli import main
 from tests.fixtures import build_sample_db
@@ -67,6 +68,56 @@ class CliTests(unittest.TestCase):
         # Only the email-handle thread falls after that date, and it is not
         # linked without a Contacts lookup, so nothing should be found.
         self.assertEqual(code, 1)
+
+
+class NewFlagTests(CliTests):
+    def test_check_passes_on_a_readable_database(self):
+        code, out, _ = self.run_cli("--check", "--db", str(self.db))
+        self.assertEqual(code, 0)
+        self.assertIn("Ready.", out)
+
+    def test_check_fails_when_the_database_is_missing(self):
+        code, out, _ = self.run_cli("--check", "--db", str(self.temp / "gone.db"))
+        self.assertEqual(code, 1)
+        self.assertIn("Not ready yet", out)
+
+    def test_text_flag_writes_a_plain_text_copy(self):
+        target = self.temp / "both.docx"
+        code, out, _ = self.run_cli("555-123-4567", "--db", str(self.db),
+                                    "--no-contacts", "--text", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(target.with_suffix(".txt").exists())
+        self.assertIn(".txt", out)
+
+    def test_completeness_is_reported(self):
+        code, out, _ = self.run_cli("555-123-4567", "--db", str(self.db),
+                                    "--no-contacts", "-o", str(self.temp / "c.docx"))
+        self.assertEqual(code, 0)
+        self.assertIn("of 6 messages exported", out)
+
+    def test_no_copy_reads_the_database_in_place(self):
+        code, _, _ = self.run_cli("555-123-4567", "--db", str(self.db), "--no-contacts",
+                                  "--no-copy", "-o", str(self.temp / "nc.docx"))
+        self.assertEqual(code, 0)
+
+    def test_interactive_mode_asks_for_the_details(self):
+        answers = iter(["555-123-4567", "Alex", "Andrew", "n", "n"])
+        target = self.temp / "ask.docx"
+        with mock.patch("builtins.input", lambda *args: next(answers)):
+            code, out, _ = self.run_cli("--interactive", "--db", str(self.db),
+                                        "--no-contacts", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(target.exists())
+        self.assertTrue(target.with_suffix(".txt").exists())
+        self.assertIn("3 from Alex", out)
+
+    def test_interactive_mode_re_asks_after_a_bad_number(self):
+        answers = iter(["", "y", "555-123-4567", "", "", "n", "n"])
+        with mock.patch("builtins.input", lambda *args: next(answers)):
+            code, out, _ = self.run_cli("--interactive", "--db", str(self.db),
+                                        "--no-contacts", "-o", str(self.temp / "retry.docx"))
+        self.assertEqual(code, 0)
+        self.assertIn("Enter a phone number", out)
 
 
 if __name__ == "__main__":

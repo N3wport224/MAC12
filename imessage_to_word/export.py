@@ -23,6 +23,18 @@ BUBBLE_INSET = int(1.7 * INCH)
 
 ProgressCallback = Optional[Callable[[str], None]]
 
+# Word copes with transcripts this long, but takes its time opening them.
+LARGE_DOCUMENT_MESSAGES = 20000
+
+
+def large_document_note(message_count: int) -> Optional[str]:
+    if message_count < LARGE_DOCUMENT_MESSAGES:
+        return None
+    return (
+        "That is a big transcript ({:,} messages) -- Word may take a minute to "
+        "open it. The plain-text copy opens instantly if you need it sooner."
+    ).format(message_count)
+
 
 class ExportError(Exception):
     pass
@@ -39,11 +51,16 @@ class ExportOptions:
     my_name: str = "Me"
     include_groups: bool = False
     include_reactions: bool = False
+    # Keep messages that carry no readable text (stickers, links, Apple Cash,
+    # group events) as a labelled note, so the transcript stays complete.
+    include_untexted: bool = True
     start: Optional[datetime] = None
     end: Optional[datetime] = None
     db_path: Optional[Path] = None
     copy_database: bool = True
     lookup_contact_name: bool = True
+    # Write a plain .txt transcript alongside the .docx.
+    also_text: bool = False
     # Pull the person's other numbers / email addresses from Contacts so a
     # thread split across handles still exports as one conversation.
     link_contact_handles: bool = True
@@ -62,6 +79,11 @@ class ExportResult:
     first_date: Optional[datetime] = None
     last_date: Optional[datetime] = None
     handles: List[str] = field(default_factory=list)
+    text_path: Optional[Path] = None
+    stats: Optional[object] = None
+
+    def completeness(self) -> str:
+        return self.stats.summary() if self.stats else ""
 
 
 # -- formatting helpers ----------------------------------------------------
@@ -156,6 +178,8 @@ def _summary_rows(conversation: Conversation, their_name: str, my_name: str):
     if named_chats:
         kind = "Conversations" if len(named_chats) > 1 else "Conversation"
         rows.append([label(kind), value(", ".join(named_chats[:6]))])
+    if conversation.stats and conversation.stats.rows_seen:
+        rows.append([label("Completeness"), value(conversation.stats.summary())])
     rows.append([label("Exported"), value(format_date_time(datetime.now().astimezone()))])
     return rows
 
@@ -234,6 +258,15 @@ def _add_message(document: Document, message: Message, their_name: str, my_name:
         )
         return
 
+    if message.is_placeholder:
+        document.add_paragraph(
+            [Run(message.text, italic=True, color=MUTED, size=9.5)],
+            indent_left=indent_left + 120,
+            indent_right=indent_right,
+            space_after=40,
+        )
+        return
+
     runs = _message_runs(message, MUTED)
     document.add_paragraph(
         runs or [Run("(no text)", italic=True, color=FAINT, size=9.5)],
@@ -245,15 +278,24 @@ def _add_message(document: Document, message: Message, their_name: str, my_name:
     )
 
 
-def build_document(conversation: Conversation, their_name: str, my_name: str = "Me") -> Document:
+def build_document(
+    conversation: Conversation,
+    their_name: str,
+    my_name: str = "Me",
+    progress: ProgressCallback = None,
+) -> Document:
     document = Document(
         title="iMessage conversation with {}".format(their_name),
         author="iMessage to Word",
     )
     _add_header(document, conversation, their_name, my_name)
 
+    total = len(conversation.messages)
     current_day = None
-    for message in conversation.messages:
+    for index, message in enumerate(conversation.messages):
+        # Long histories take a while; say where we are rather than look stuck.
+        if progress and index and index % 2500 == 0:
+            progress("Formatting message {:,} of {:,}...".format(index, total))
         day = message.date.date() if message.date else None
         if day != current_day:
             current_day = day
@@ -273,6 +315,66 @@ def build_document(conversation: Conversation, their_name: str, my_name: str = "
             [Run("No messages were found for this number.", italic=True, color=MUTED)]
         )
     return document
+
+
+def write_text_transcript(
+    conversation: Conversation, path: Path, their_name: str, my_name: str = "Me"
+) -> Path:
+    """Write the same transcript as plain UTF-8 text.
+
+    Handy for searching, grepping, or pasting somewhere that will not take a
+    Word file -- and a fallback if anything about the .docx ever misbehaves.
+    """
+    lines: List[str] = [
+        "iMessage conversation - {} and {}".format(my_name, their_name),
+        "=" * 60,
+    ]
+    if conversation.handles:
+        lines.append("Handles: {}".format(", ".join(conversation.handles)))
+    if conversation.first_date and conversation.last_date:
+        lines.append("Covering: {}  to  {}".format(
+            format_date_time(conversation.first_date),
+            format_date_time(conversation.last_date)))
+    lines.append("Messages: {} total ({} from {}, {} from {})".format(
+        len(conversation.messages), conversation.count_from_them(), their_name,
+        conversation.count_from_me(), my_name))
+    if conversation.stats and conversation.stats.rows_seen:
+        lines.append("Completeness: {}".format(conversation.stats.summary()))
+    lines.append("Exported: {}".format(format_date_time(datetime.now().astimezone())))
+    lines.append("")
+
+    current_day = None
+    for message in conversation.messages:
+        day = message.date.date() if message.date else None
+        if day != current_day:
+            current_day = day
+            heading = format_day(message.date) if message.date else "Undated messages"
+            lines.extend(["", "--- {} ---".format(heading), ""])
+
+        speaker = my_name if message.is_from_me else (
+            message.sender_handle_name or their_name)
+        stamp = format_time(message.date) if message.date else "--:--"
+        prefix = "[{}] {}: ".format(stamp, speaker)
+        indent = " " * min(len(prefix), 20)
+        pieces = []
+        for attachment in message.attachments:
+            size = format_size(attachment.total_bytes)
+            pieces.append("<{}{}>".format(
+                attachment.describe(), " ({})".format(size) if size else ""))
+        body = message.text or ""
+        if not body and pieces:
+            body = pieces.pop(0)   # an attachment-only message reads better inline
+        first, _, rest = body.partition("\n")
+        lines.append(prefix + first)
+        for line in (rest.split("\n") if rest else []):
+            lines.append(indent + line)
+        for piece in pieces:
+            lines.append(indent + piece)
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 # -- orchestration ---------------------------------------------------------
@@ -318,6 +420,7 @@ def export_to_word(
             extra_handles=extra_handles,
             include_groups=options.include_groups,
             include_reactions=options.include_reactions,
+            include_untexted=options.include_untexted,
             start=options.start,
             end=options.end,
         )
@@ -345,10 +448,18 @@ def export_to_word(
             if phones.match_key(message.sender_handle) not in person_keys:
                 message.sender_handle_name = phones.format_pretty(message.sender_handle)
 
-    report("Writing {} messages to Word...".format(len(conversation.messages)))
+    report("Writing {:,} messages to Word...".format(len(conversation.messages)))
     destination = Path(output_path) if output_path else default_output_path(their_name)
-    document = build_document(conversation, their_name, options.my_name)
+    document = build_document(conversation, their_name, options.my_name, progress=progress)
+    report("Saving {}...".format(destination.name))
     document.save(destination)
+
+    text_path = None
+    if options.also_text:
+        report("Writing the plain-text copy...")
+        text_path = write_text_transcript(
+            conversation, destination.with_suffix(".txt"), their_name, options.my_name
+        )
 
     return ExportResult(
         path=destination,
@@ -361,4 +472,6 @@ def export_to_word(
         first_date=conversation.first_date,
         last_date=conversation.last_date,
         handles=conversation.handles,
+        text_path=text_path,
+        stats=conversation.stats,
     )

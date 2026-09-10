@@ -12,7 +12,13 @@ from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from . import phones
 from .attributed_body import clean_text, decode_attributed_body
-from .models import Attachment, Conversation, Message, apple_time_to_datetime
+from .models import (
+    Attachment,
+    Conversation,
+    FetchStats,
+    Message,
+    apple_time_to_datetime,
+)
 
 DEFAULT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
 
@@ -77,24 +83,30 @@ def open_chat_db(path: Optional[Path] = None, copy: bool = True) -> Iterator[sql
     path = Path(path) if path else DEFAULT_DB_PATH
     check_access(path)
 
+    read_only_uri = "file:{}?mode=ro&immutable=1".format(path)
     temp_dir = None
     connection = None
     try:
         if copy:
-            temp_dir = tempfile.mkdtemp(prefix="imessage-export-")
-            working = Path(temp_dir) / "chat.db"
-            shutil.copyfile(path, working)
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(str(path) + suffix)
-                if sidecar.exists():
-                    try:
-                        shutil.copyfile(sidecar, Path(str(working) + suffix))
-                    except OSError:
-                        pass  # A missing sidecar just means slightly older data.
-            connection = sqlite3.connect(str(working))
+            try:
+                temp_dir = tempfile.mkdtemp(prefix="imessage-export-")
+                working = Path(temp_dir) / "chat.db"
+                shutil.copyfile(path, working)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(str(path) + suffix)
+                    if sidecar.exists():
+                        try:
+                            shutil.copyfile(sidecar, Path(str(working) + suffix))
+                        except OSError:
+                            pass  # A missing sidecar just means slightly older data.
+                connection = sqlite3.connect(str(working))
+            except OSError:
+                # Usually not enough room for the copy; read it in place instead.
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir = None
+                connection = sqlite3.connect(read_only_uri, uri=True)
         else:
-            uri = "file:{}?mode=ro&immutable=1".format(path)
-            connection = sqlite3.connect(uri, uri=True)
+            connection = sqlite3.connect(read_only_uri, uri=True)
         connection.row_factory = sqlite3.Row
     except sqlite3.OperationalError as exc:
         if "unable to open database" in str(exc).lower():
@@ -170,11 +182,13 @@ def find_chats(
         chat_id = row["ROWID"]
         members = participants.get(chat_id, set())
         identifier_matches = phones.match_key(row["chat_identifier"] or "") in keys
-        is_direct = (
-            (members and members <= handle_ids)
-            or (not members and identifier_matches and row["style"] == STYLE_DIRECT)
-        )
         involves_person = bool(members & handle_ids) or identifier_matches
+        # Messages marks one-to-one threads with style 45; trust that when it
+        # is there, and fall back to "every participant is this person".
+        is_direct = (
+            (row["style"] == STYLE_DIRECT and involves_person)
+            or (bool(members) and members <= handle_ids)
+        )
         if is_direct or (include_groups and involves_person):
             selected.append(chat_id)
             chats[chat_id] = row
@@ -240,6 +254,10 @@ def _message_select(conn: sqlite3.Connection) -> str:
         "date_edited": "m.date_edited",
         "service": "m.service",
         "item_type": "m.item_type",
+        "balloon_bundle_id": "m.balloon_bundle_id",
+        "group_action_type": "m.group_action_type",
+        "group_title": "m.group_title",
+        "is_audio_message": "m.is_audio_message",
     }
     fields = [
         "m.ROWID AS rowid",
@@ -255,20 +273,60 @@ def _message_select(conn: sqlite3.Connection) -> str:
     return ", ".join(fields)
 
 
+BALLOON_LABELS = (
+    ("URLBalloonProvider", "[Link]"),
+    ("Handwriting", "[Handwritten message]"),
+    ("DigitalTouch", "[Digital Touch]"),
+    ("PassKit", "[Apple Cash]"),
+    ("Payment", "[Apple Cash]"),
+    ("com.apple.messages.MSMessageExtensionBalloonPlugin", "[App message]"),
+)
+
+
+def describe_untexted_message(row) -> str:
+    """Explain a message row that carries no readable text.
+
+    Stickers, link previews, Apple Cash, group events and the occasional body
+    we cannot decode all land here.  They are kept in the transcript with a
+    note rather than dropped, so the history stays complete.
+    """
+    item_type = row["item_type"] or 0
+    if item_type:
+        if item_type == 2 and row["group_title"]:
+            return '[Named the conversation "{}"]'.format(row["group_title"])
+        if item_type == 1:
+            return "[Someone joined or left the conversation]"
+        if item_type == 3:
+            return "[Left the conversation]"
+        return "[System message]"
+
+    bundle = row["balloon_bundle_id"] or ""
+    for needle, label in BALLOON_LABELS:
+        if needle in bundle:
+            return label
+    if row["is_audio_message"]:
+        return "[Audio message]"
+    if row["attributedBody"]:
+        return "[Message text could not be read]"
+    return "[No text]"
+
+
 def fetch_messages(
     conn: sqlite3.Connection,
     chat_ids: Sequence[int],
     chats: Dict[int, sqlite3.Row],
     handle_names: Dict[int, str],
+    handle_ids: Optional[Set[int]] = None,
     include_reactions: bool = False,
+    include_untexted: bool = True,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    stats: Optional[FetchStats] = None,
 ) -> List[Message]:
-    if not chat_ids:
-        return []
-
+    stats = stats if stats is not None else FetchStats()
     select = _message_select(conn)
-    rows: Dict[int, Tuple[sqlite3.Row, int]] = {}
+    rows: Dict[int, Tuple[sqlite3.Row, Optional[int]]] = {}
+
     for chunk in _chunks(list(chat_ids)):
         placeholders = ",".join("?" * len(chunk))
         sql = (
@@ -281,26 +339,65 @@ def fetch_messages(
             # The same message can be joined to more than one chat; keep one copy.
             rows.setdefault(row["rowid"], (row, row["chat_id"]))
 
+    # Messages that were never joined to a chat still belong in the history.
+    # Ask for their ids first and diff in Python: a NOT EXISTS subquery against
+    # chat_message_join costs minutes on a large history.
+    candidates = []
+    for chunk in _chunks(sorted(handle_ids or ())):
+        placeholders = ",".join("?" * len(chunk))
+        sql = "SELECT ROWID FROM message WHERE handle_id IN ({})".format(placeholders)
+        candidates.extend(
+            row[0] for row in conn.execute(sql, tuple(chunk)) if row[0] not in rows
+        )
+
+    # Of those, keep only the ones that belong to no chat at all -- a message in
+    # a chat we deliberately left out (a group chat, say) is not an orphan.
+    orphans = []
+    for chunk in _chunks(candidates):
+        placeholders = ",".join("?" * len(chunk))
+        sql = "SELECT message_id FROM chat_message_join WHERE message_id IN ({})".format(
+            placeholders
+        )
+        joined = {row[0] for row in conn.execute(sql, tuple(chunk))}
+        orphans.extend(rowid for rowid in chunk if rowid not in joined)
+
+    for chunk in _chunks(orphans):
+        placeholders = ",".join("?" * len(chunk))
+        sql = "SELECT {select}, NULL AS chat_id FROM message m WHERE m.ROWID IN ({ph})".format(
+            select=select, ph=placeholders
+        )
+        for row in conn.execute(sql, tuple(chunk)):
+            rows.setdefault(row["rowid"], (row, None))
+
+    stats.rows_seen = len(rows)
     attachments = _load_attachments(conn, list(rows))
     messages: List[Message] = []
+
     for rowid, (row, chat_id) in rows.items():
         associated = row["associated_message_type"] or 0
-        is_reaction = associated != 0
-        if is_reaction and not include_reactions:
+        if associated:
+            stats.reactions_skipped += 1
+            if not include_reactions:
+                continue
+
+        when = apple_time_to_datetime(row["date"])
+        if when and ((start and when < start) or (end and when > end)):
+            stats.outside_date_range += 1
             continue
 
         text = clean_text(row["text"] or decode_attributed_body(row["attributedBody"]))
         message_attachments = attachments.get(rowid, [])
+        is_placeholder = False
         if not text and not message_attachments:
-            continue
+            if not include_untexted:
+                continue
+            text = describe_untexted_message(row)
+            is_placeholder = True
+            stats.placeholders += 1
+            if row["attributedBody"] and not (row["item_type"] or 0):
+                stats.unreadable_bodies += 1
 
-        when = apple_time_to_datetime(row["date"])
-        if when and start and when < start:
-            continue
-        if when and end and when > end:
-            continue
-
-        chat_row = chats.get(chat_id)
+        chat_row = chats.get(chat_id) if chat_id is not None else None
         messages.append(
             Message(
                 rowid=rowid,
@@ -312,12 +409,16 @@ def fetch_messages(
                 chat_id=chat_id,
                 chat_name=_chat_label(chat_row, ""),
                 is_group=bool(chat_row is not None and chat_row["style"] != STYLE_DIRECT),
-                is_reaction=is_reaction,
+                is_reaction=bool(associated),
                 is_edited=bool(row["date_edited"]),
+                is_placeholder=is_placeholder,
                 attachments=message_attachments,
             )
         )
 
+    if include_reactions:
+        stats.reactions_skipped = 0
+    stats.exported = len(messages)
     # Messages with an unreadable timestamp sort to the end, in insertion order.
     messages.sort(key=lambda m: (m.date is None, m.date or _FALLBACK_DATE, m.rowid))
     return messages
@@ -330,6 +431,7 @@ def fetch_conversation(
     display_name: Optional[str] = None,
     include_groups: bool = False,
     include_reactions: bool = False,
+    include_untexted: bool = True,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
 ) -> Conversation:
@@ -349,14 +451,18 @@ def fetch_conversation(
     }
 
     chat_ids, chats = find_chats(conn, handle_ids, targets, include_groups=include_groups)
+    stats = FetchStats()
     messages = fetch_messages(
         conn,
         chat_ids,
         chats,
         handle_names,
+        handle_ids=handle_ids,
         include_reactions=include_reactions,
+        include_untexted=include_untexted,
         start=start,
         end=end,
+        stats=stats,
     )
 
     chat_names = []
@@ -372,6 +478,7 @@ def fetch_conversation(
         messages=messages,
         chat_names=chat_names,
         included_group_chats=include_groups,
+        stats=stats,
     )
 
 

@@ -11,6 +11,34 @@ ships with macOS.
 
 ---
 
+## Do this first (about two minutes)
+
+```bash
+cd /path/to/this/folder
+python3 -m imessage_to_word --check
+```
+
+That checks the six things that decide whether an export will work: your Python
+version, whether a window can open, whether macOS is letting you read the
+Messages database, free disk space, that your history is actually on this Mac,
+and that a test Word file can be written. Anything marked `[FAIL]` comes with
+the fix next to it. Run it again until it says **Ready.**
+
+Then find the exact number Messages has for the person:
+
+```bash
+python3 -m imessage_to_word --list
+```
+
+And export:
+
+```bash
+python3 app.py                   # the window
+python3 -m imessage_to_word "+15551234567" --text --open   # or the command line
+```
+
+---
+
 ## Setup (once)
 
 ### 1. Give Full Disk Access to whatever you launch it from
@@ -54,25 +82,39 @@ Fill in:
 | **Date range** | Optional `YYYY-MM-DD` bounds |
 | **Include group chats** | Off by default, so you get the one-to-one thread only |
 | **Include tapbacks** | Off by default (the Loved / Liked / Laughed reactions) |
+| **Also save a plain text copy** | On by default — a `.txt` next to the `.docx` |
 | **Save to** | Defaults to `~/Documents/iMessage Exports/` |
+
+There is also a **Check setup** button, which runs the same checks as
+`--check` and reports back in a dialog.
 
 ### The command line
 
 Same engine, no window:
 
 ```bash
-# Export a conversation
-python3 -m imessage_to_word "+1 555 123 4567" --name "Alex" --me "Andrew" --open
+# Check this Mac is ready
+python3 -m imessage_to_word --check
 
-# Not sure which number Messages has for them? List what's in the database
+# See which handles Messages actually has
 python3 -m imessage_to_word --list
+
+# Export a conversation, with a plain-text copy, and open it
+python3 -m imessage_to_word "+1 555 123 4567" --name "Alex" --me "Andrew" --text --open
 
 # A date range, group chats included, to a specific file
 python3 -m imessage_to_word 5551234567 --from 2025-01-01 --to 2025-12-31 \
     --groups -o ~/Desktop/alex-2025.docx
+
+# No flags to remember: it asks for what it needs
+python3 -m imessage_to_word --interactive
 ```
 
-`python3 -m imessage_to_word --help` lists every option.
+`python3 -m imessage_to_word --help` lists every option. The less obvious ones:
+`--text` (also write a `.txt`), `--no-copy` (read the database in place instead
+of copying it — for when disk space is tight), `--no-placeholders` (drop
+messages that carry no readable text), `--no-contacts` (skip the Contacts
+lookup).
 
 ---
 
@@ -89,10 +131,35 @@ python3 -m imessage_to_word 5551234567 --from 2025-01-01 --to 2025-12-31 \
 - Attachments listed by what they were (`Photo: IMG_0042.HEIC (2.3 MB)`), since
   the files themselves stay in the Messages attachment folder.
 - Page numbers in the footer.
+- A **Completeness** line: `4,812 of 4,813 messages exported; 1 tapback left
+  out`. Every row the app looked at is either exported, or counted in that
+  line — nothing disappears quietly.
 
 So the two speakers are distinguished three ways at once — name, colour, and
 which side of the page the text sits on — which survives printing in black and
 white.
+
+---
+
+## Getting the *whole* history
+
+The point of this app is a complete record, so the awkward cases are handled
+rather than skipped:
+
+- **Messages with no text.** Link previews, Apple Cash, audio messages,
+  stickers, app messages and group events have no words in them. They stay in
+  the transcript as a labelled note (`[Link]`, `[Apple Cash]`, `[Audio
+  message]`) instead of vanishing. `--no-placeholders` drops them if you would
+  rather have clean prose.
+- **Messages the database stores oddly.** Bodies archived in `attributedBody`
+  are decoded; the rare one that cannot be read becomes `[Message text could
+  not be read]` and is counted, so you know it existed.
+- **Messages attached to no conversation.** Rare, but they exist; they are
+  pulled in too.
+- **Old databases.** A chat.db from 2013 has none of the modern columns and
+  stores its dates differently. Both work.
+- **Long histories.** A 60,000-message thread exports in about five seconds and
+  Word opens the result; progress is reported along the way.
 
 ---
 
@@ -150,8 +217,9 @@ imessage_to_word/
     models.py                   Message / Conversation types, Apple-epoch dates
     docx_writer.py              minimal Word (.docx) writer, no dependencies
     export.py                   builds the document, orchestrates the export
-    cli.py                      command-line interface
-tests/                          70 tests, run without a Mac or a real database
+    cli.py                      command-line interface (incl. --check, --interactive)
+    preflight.py                the setup checks behind --check
+tests/                          119 tests, run without a Mac or a real database
 ```
 
 ## Tests
@@ -160,8 +228,9 @@ tests/                          70 tests, run without a Mac or a real database
 python3 -m unittest discover -s tests -t .
 ```
 
-The suite builds a miniature `chat.db` with the real Messages schema, so the
-whole path — matching, decoding, filtering, document generation — is covered
-without touching your own data. Installing `python-docx` (`pip3 install
+The suite builds miniature `chat.db` files with the real Messages schema —
+a normal thread, a 2013-era one, one full of awkward untexted messages, and a
+4,000-message one — so the whole path (matching, decoding, filtering, document
+generation, the window's own logic) is covered without touching your own data. Installing `python-docx` (`pip3 install
 python-docx`) enables a few extra checks that a Word library can read the
 generated file; without it those are skipped.
