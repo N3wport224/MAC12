@@ -9,6 +9,10 @@ on this Mac, never modifies it, and writes a `.docx` file. Nothing is uploaded
 anywhere, and there are no dependencies to install — it uses the Python that
 ships with macOS.
 
+**New to the Mac?** [GETTING-STARTED.md](GETTING-STARTED.md) walks through the
+whole thing from scratch — opening Terminal, installing what is needed, and
+granting the one permission macOS requires.
+
 ---
 
 ## Do this first (about two minutes)
