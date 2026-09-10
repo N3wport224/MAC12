@@ -34,57 +34,138 @@ from imessage_to_word.export import (
     export_loaded,
     export_to_word,
     format_time,
-    gap_note,
     large_document_note,
     load_conversation,
     parse_date_input,
-    preview_selection,
 )
+from imessage_to_word.preview import (
+    ASTRAL_PLACEHOLDER,
+    find_messages,
+    find_ranges,
+    gap_note,
+    preview_selection,
+    strip_astral,
+)
+from imessage_to_word.preview import matches as search_matches
 from imessage_to_word.export import ME_COLOR, MUTED, THEM_COLOR, format_day
 
 # How many messages the preview window shows before it starts skipping the
 # middle. The export is never limited.
 PREVIEW_MESSAGES = 600
 
+# At most this many matching messages are listed in the filtered view.
+FILTER_MESSAGES = 500
+
 # The document's colours, in the form Tk wants them.
 MUTED_UI = "#" + MUTED
 THEM_UI = "#" + THEM_COLOR
 ME_UI = "#" + ME_COLOR
+MATCH_UI = "#FFF1A8"
+CURRENT_MATCH_UI = "#FFC24D"
 
 PRIVACY_SETTINGS_URL = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 )
 
 
+def for_display(text: str) -> str:
+    """Make text safe to put in a Tk widget.
+
+    Characters above U+FFFF -- most emoji -- are trouble twice over: the Tk
+    that ships with older macOS refuses to insert them at all, and even current
+    Tk segfaults when its text widget is searched while holding one. They are
+    swapped one-for-one for a placeholder here; the Word document and the .txt
+    keep the real characters.
+    """
+    return strip_astral(text)
+
+
 class PreviewWindow:
     """A read-only look at the conversation, before anything is written."""
 
-    def __init__(self, parent, loaded, on_export):
+    def __init__(self, parent, loaded, on_export, display=None):
         self.loaded = loaded
         self.on_export = on_export
+        self.displayed = []          # the messages currently on screen
+        self.buffer = ""             # exactly what is in the text widget
+        self.body_ranges = []        # (start, end) offsets of each message body
+        self.match_ranges = []       # every highlighted hit, in order
+        self.current_match = -1
+        self.filtered_term = None
+        self.substituted = False
 
         self.top = tk.Toplevel(parent)
-        self.top.title("Preview - {} and {}".format(loaded.my_name, loaded.their_name))
-        self.top.geometry("760x640")
+        self.top.geometry("780x660")
         self.top.transient(parent)
         self.top.columnconfigure(0, weight=1)
-        self.top.rowconfigure(1, weight=1)
+        self.top.rowconfigure(2, weight=1)
+        self.display = display or for_display
 
-        heading = ttk.Frame(self.top, padding=(16, 14, 16, 8))
+        self._build_heading()
+        self._build_search_bar()
+        self._build_text()
+        self._build_buttons()
+
+        self.top.title(self.display("Preview - {} and {}".format(
+            loaded.my_name, loaded.their_name)))
+        self.show_everything()
+
+        self.top.bind("<Escape>", self._on_escape)
+        for sequence in ("<Control-f>", "<Command-f>"):
+            self.top.bind(sequence, self._focus_search)
+
+    # -- building the window ----------------------------------------------
+    def _build_heading(self) -> None:
+        heading = ttk.Frame(self.top, padding=(16, 14, 16, 4))
         heading.grid(row=0, column=0, sticky="ew")
-        ttk.Label(heading, text="{} and {}".format(loaded.my_name, loaded.their_name),
-                  font=("Helvetica", 14, "bold")).pack(anchor="w")
-        subtitle = loaded.headline()
-        if loaded.date_span():
-            subtitle += "\n" + loaded.date_span()
-        completeness = loaded.conversation.stats
-        if completeness and completeness.rows_seen:
-            subtitle += "\n" + completeness.summary()
-        ttk.Label(heading, text=subtitle, foreground=MUTED_UI, justify="left",
-                  wraplength=700).pack(anchor="w")
+        ttk.Label(heading, text=self.display("{} and {}".format(
+            self.loaded.my_name, self.loaded.their_name)),
+            font=("Helvetica", 14, "bold")).pack(anchor="w")
 
+        subtitle = self.loaded.headline()
+        if self.loaded.date_span():
+            subtitle += "\n" + self.loaded.date_span()
+        stats = self.loaded.conversation.stats
+        if stats and stats.rows_seen:
+            subtitle += "\n" + stats.summary()
+        ttk.Label(heading, text=self.display(subtitle), foreground=MUTED_UI,
+                  justify="left", wraplength=720).pack(anchor="w")
+
+        # Only shown if something actually had to be substituted.
+        self.note_var = tk.StringVar(value="")
+        ttk.Label(heading, textvariable=self.note_var, foreground=MUTED_UI,
+                  font=("Helvetica", 11, "italic"), wraplength=720).pack(anchor="w")
+
+    def _build_search_bar(self) -> None:
+        bar = ttk.Frame(self.top, padding=(16, 6, 16, 6))
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.columnconfigure(1, weight=1)
+
+        ttk.Label(bar, text="Find").grid(row=0, column=0, padx=(0, 8))
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var)
+        self.search_entry.grid(row=0, column=1, sticky="ew")
+        self.search_entry.bind("<KeyRelease>", self._on_search_typed)
+        self.search_entry.bind("<Return>", self.next_match)
+        self.search_entry.bind("<Shift-Return>", self.previous_match)
+
+        self.search_status_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.search_status_var, foreground=MUTED_UI,
+                  width=34, anchor="w").grid(row=0, column=2, padx=(10, 6))
+
+        self.previous_button = ttk.Button(bar, text="<", width=3,
+                                          command=self.previous_match)
+        self.previous_button.grid(row=0, column=3)
+        self.next_button = ttk.Button(bar, text=">", width=3, command=self.next_match)
+        self.next_button.grid(row=0, column=4, padx=(4, 8))
+        self.filter_button = ttk.Button(bar, text="Show only matches",
+                                        command=self.toggle_filter)
+        self.filter_button.grid(row=0, column=5)
+        self._set_search_controls(enabled=False)
+
+    def _build_text(self) -> None:
         body = ttk.Frame(self.top, padding=(16, 0, 16, 0))
-        body.grid(row=1, column=0, sticky="nsew")
+        body.grid(row=2, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -96,17 +177,15 @@ class PreviewWindow:
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.text.configure(yscrollcommand=scrollbar.set)
         self._configure_tags()
-        self._fill()
 
+    def _build_buttons(self) -> None:
         buttons = ttk.Frame(self.top, padding=16)
-        buttons.grid(row=2, column=0, sticky="ew")
+        buttons.grid(row=3, column=0, sticky="ew")
         ttk.Button(buttons, text="Close", command=self.close).pack(side="right")
         ttk.Button(buttons, text="Export this to Word",
                    command=self.export).pack(side="right", padx=(0, 10))
-        ttk.Label(buttons, text="Scroll to check it is the right conversation.",
+        ttk.Label(buttons, text="Everything here is included in the export.",
                   foreground=MUTED_UI).pack(side="left")
-
-        self.top.bind("<Escape>", lambda _event: self.close())
 
     def _configure_tags(self) -> None:
         self.text.tag_configure("day", justify="center", foreground=MUTED_UI,
@@ -115,6 +194,9 @@ class PreviewWindow:
         self.text.tag_configure("gap", justify="center", foreground=MUTED_UI,
                                 font=("Helvetica", 10, "italic"),
                                 spacing1=14, spacing3=14)
+        self.text.tag_configure("banner", foreground=MUTED_UI,
+                                font=("Helvetica", 11, "italic"),
+                                spacing1=4, spacing3=14)
         for side, colour, indent in (("them", THEM_UI, 0), ("me", ME_UI, 90)):
             self.text.tag_configure(
                 "name_" + side, foreground=colour,
@@ -126,38 +208,183 @@ class PreviewWindow:
             self.text.tag_configure(
                 "note_" + side, foreground=MUTED_UI, font=("Helvetica", 11, "italic"),
                 lmargin1=indent, lmargin2=indent, spacing3=2)
+        for tag, colour in (("match", MATCH_UI), ("match_current", CURRENT_MATCH_UI)):
+            self.text.tag_configure(tag, background=colour)
+            try:
+                # Otherwise a match at the start of a line tints the whole
+                # indent as well. Tk 8.5 (older macOS) has no such option.
+                self.text.tag_configure(tag, lmargincolor=self.text.cget("background"))
+            except tk.TclError:
+                pass
+        self.text.tag_raise("match_current")
+
+    # -- filling it in -----------------------------------------------------
+    def _insert(self, text: str, tag: str) -> None:
+        shown = self.display(text)
+        if shown != text:
+            self.substituted = True
+        self.text.insert("end", shown, (tag,))
+        self.buffer += shown
+
+    def _index(self, offset: int) -> str:
+        """Turn an offset into our buffer into a Tk text index."""
+        return "1.0+{}c".format(offset)
 
     def _add_message(self, message, day_state) -> None:
         day = message.date.date() if message.date else None
         if day != day_state.get("day"):
             day_state["day"] = day
             heading = format_day(message.date) if message.date else "Undated messages"
-            self.text.insert("end", heading + "\n", ("day",))
+            self._insert(heading + "\n", "day")
 
         side = "me" if message.is_from_me else "them"
         speaker = (self.loaded.my_name if message.is_from_me
                    else (message.sender_handle_name or self.loaded.their_name))
         stamp = format_time(message.date) if message.date else ""
-        self.text.insert("end", "{}   {}\n".format(speaker, stamp), ("name_" + side,))
+        self._insert("{}   {}\n".format(speaker, stamp), "name_" + side)
 
+        # Remember where this message's own words start and end, so a search
+        # only ever highlights what was said -- not names or timestamps.
+        start = len(self.buffer)
         tag = ("note_" if message.is_placeholder else "body_") + side
         if message.text:
-            self.text.insert("end", message.text + "\n", (tag,))
+            self._insert(message.text + "\n", tag)
         for attachment in message.attachments:
-            self.text.insert("end", attachment.describe() + "\n", ("note_" + side,))
+            self._insert(attachment.describe() + "\n", "note_" + side)
+        self.body_ranges.append((start, len(self.buffer)))
 
-    def _fill(self) -> None:
-        head, tail, omitted = preview_selection(self.loaded.messages, PREVIEW_MESSAGES)
+    def _render(self, messages, banner=None, gap_after=None, tail=()) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.buffer = ""
+        self.body_ranges = []
+        self.substituted = False
+        self.displayed = list(messages) + list(tail)
+
+        if banner:
+            self._insert(banner + "\n", "banner")
         day_state = {}
-        for message in head:
+        for message in messages:
             self._add_message(message, day_state)
-        if omitted:
-            self.text.insert("end", gap_note(omitted) + "\n", ("gap",))
+        if gap_after:
+            self._insert(gap_after + "\n", "gap")
             day_state["day"] = None
             for message in tail:
                 self._add_message(message, day_state)
         self.text.configure(state="disabled")
+        self.note_var.set(
+            "Emoji appear as {} in this preview -- the Word and text files keep "
+            "them.".format(ASTRAL_PLACEHOLDER) if self.substituted else "")
 
+    def show_everything(self) -> None:
+        """The default view: the start and the end of the conversation."""
+        head, tail, omitted = preview_selection(self.loaded.messages, PREVIEW_MESSAGES)
+        self._render(head, gap_after=gap_note(omitted) if omitted else None, tail=tail)
+        self.filtered_term = None
+        self.filter_button.configure(text="Show only matches")
+        self._highlight(self.search_var.get().strip())
+
+    # -- searching ---------------------------------------------------------
+    def _set_search_controls(self, enabled: bool) -> None:
+        state = "!disabled" if enabled else "disabled"
+        for button in (self.previous_button, self.next_button):
+            button.state([state])
+
+    def _on_search_typed(self, event=None) -> None:
+        self._highlight(self.search_var.get().strip())
+
+    def _highlight(self, term: str) -> None:
+        for tag in ("match", "match_current"):
+            self.text.tag_remove(tag, "1.0", "end")
+        self.match_ranges = []
+        self.current_match = -1
+
+        if term:
+            needle = self.display(term)
+            for start, end in self.body_ranges:
+                body = self.buffer[start:end]
+                for at, to in find_ranges(body, needle):
+                    first, last = self._index(start + at), self._index(start + to)
+                    self.text.tag_add("match", first, last)
+                    self.match_ranges.append((first, last))
+
+        self._update_search_status(term)
+        if self.match_ranges:
+            self._go_to_match(0)
+
+    def _update_search_status(self, term: str) -> None:
+        if not term:
+            self.search_status_var.set("")
+            self._set_search_controls(False)
+            self.filter_button.state(["disabled"])
+            return
+
+        _, total = find_messages(self.loaded.messages, term)
+        shown = sum(1 for message in self.displayed if search_matches(message, term))
+        hidden = max(total - shown, 0)
+
+        if self.match_ranges:
+            position = "{} of {}".format(self.current_match + 1, len(self.match_ranges)) \
+                if self.current_match >= 0 else "{} here".format(len(self.match_ranges))
+        elif total:
+            position = "none in view"
+        else:
+            position = "no matches"
+
+        if hidden:
+            position += "  ({:,} in messages not shown)".format(hidden)
+        self.search_status_var.set(position)
+        self._set_search_controls(bool(self.match_ranges))
+        self.filter_button.state(["!disabled" if total or self.filtered_term else "disabled"])
+
+    def _go_to_match(self, index: int) -> None:
+        if not self.match_ranges:
+            return
+        self.text.tag_remove("match_current", "1.0", "end")
+        self.current_match = index % len(self.match_ranges)
+        start, end = self.match_ranges[self.current_match]
+        self.text.tag_add("match_current", start, end)
+        self.text.see(start)
+        self._update_search_status(self.search_var.get().strip())
+
+    def next_match(self, event=None) -> str:
+        self._go_to_match(self.current_match + 1)
+        return "break"
+
+    def previous_match(self, event=None) -> str:
+        self._go_to_match(self.current_match - 1)
+        return "break"
+
+    def toggle_filter(self) -> None:
+        """Swap between the whole conversation and only what matches."""
+        term = self.search_var.get().strip()
+        if self.filtered_term is not None or not term:
+            self.show_everything()
+            return
+
+        found, total = find_messages(self.loaded.messages, term, limit=FILTER_MESSAGES)
+        if not total:
+            return          # nothing to narrow to; leave the view as it is
+        banner = 'Showing {:,} of {:,} messages containing "{}". All {:,} are still exported.'.format(
+            len(found), total, term, len(self.loaded.messages))
+        self._render(found, banner=banner)
+        self.filtered_term = term
+        self.filter_button.configure(text="Show whole conversation")
+        self._highlight(term)
+
+    def _focus_search(self, event=None) -> str:
+        self.search_entry.focus_set()
+        self.search_entry.select_range(0, "end")
+        return "break"
+
+    def _on_escape(self, event=None) -> None:
+        if self.search_var.get().strip():
+            self.search_var.set("")
+            self.show_everything()
+            return
+        self.close()
+
+    # -- finishing ---------------------------------------------------------
     def export(self) -> None:
         self.close()
         self.on_export(self.loaded)
@@ -173,6 +400,7 @@ class ExporterApp:
         self.worker = None
         self.chosen_path = None
         self.preview = None
+        self.display = for_display
 
         root.title("iMessage to Word")
         root.minsize(560, 470)
@@ -438,9 +666,10 @@ class ExporterApp:
 
     def _finish_preview(self, loaded) -> None:
         self._reset()
-        self.status_var.set(
-            "Previewing {}. Nothing has been written yet.".format(loaded.headline()))
-        self.preview = PreviewWindow(self.root, loaded, on_export=self.start_export)
+        self.status_var.set(self.display(
+            "Previewing {}. Nothing has been written yet.".format(loaded.headline())))
+        self.preview = PreviewWindow(self.root, loaded, on_export=self.start_export,
+                                     display=self.display)
 
     def _finish_checks(self, text: str) -> None:
         self._reset()
@@ -464,6 +693,7 @@ class ExporterApp:
         note = large_document_note(result.message_count)
         if note:
             summary += "\n\n{}".format(note)
+        summary = self.display(summary)
         self.status_var.set(summary)
         if messagebox.askyesno("Export finished", summary + "\n\nOpen it now?",
                                parent=self.root):

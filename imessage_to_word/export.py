@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence
 
 from . import chatdb, contacts, phones
 from .docx_writer import INCH, Document, Run, Table
@@ -423,28 +423,6 @@ def write_text_transcript(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
-
-
-def preview_selection(
-    messages: Sequence[Message], limit: Optional[int] = None
-) -> Tuple[List[Message], List[Message], int]:
-    """Split messages into (beginning, end, number left out) for a preview.
-
-    A long history previews as its start and its finish, which is what tells
-    you whether you have the right conversation; the export still gets all of
-    them.
-    """
-    messages = list(messages)
-    if not limit or limit <= 0 or len(messages) <= limit:
-        return messages, [], 0
-    head = limit // 2
-    tail = limit - head
-    return messages[:head], messages[-tail:], len(messages) - limit
-
-
-def gap_note(omitted: int) -> str:
-    return "... {:,} messages not shown here -- all of them are in the export ...".format(
-        omitted)
 
 
 # -- orchestration ---------------------------------------------------------

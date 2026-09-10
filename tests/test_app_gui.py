@@ -231,7 +231,7 @@ class PreviewTests(AppTestCase):
         self.assertIn("dinner at 7", body)
 
     def test_a_long_history_shows_the_start_and_the_end(self):
-        from imessage_to_word.export import preview_selection
+        from imessage_to_word.preview import preview_selection
         messages = list(range(1000))
         head, tail, omitted = preview_selection(messages, 40)
         self.assertEqual(len(head) + len(tail), 40)
@@ -244,6 +244,147 @@ class PreviewTests(AppTestCase):
         self.window.start_preview()
         self.assertIsNone(self.window.worker)
         self.assertEqual(self.recorder.last()[0], "showwarning")
+
+
+class PreviewSearchTests(PreviewTests):
+    """The search box narrows what you look at, never what gets exported."""
+
+    def search(self, term):
+        self.window.preview.search_var.set(term)
+        self.window.preview._on_search_typed()
+        return self.window.preview
+
+    def test_typing_reports_how_many_messages_match(self):
+        self.run_preview()
+        preview = self.search("dinner")
+        self.assertIn("dinner", preview.search_var.get())
+        status = preview.search_status_var.get()
+        self.assertTrue(status, "the search box should say what it found")
+
+    def test_a_term_that_is_not_there_says_so(self):
+        self.run_preview()
+        preview = self.search("zebra")
+        self.assertIn("no matches", preview.search_status_var.get())
+
+    def test_showing_only_matches_hides_everything_else(self):
+        self.run_preview()
+        preview = self.search("dinner")
+        preview.toggle_filter()
+        shown = preview.text.content()
+        self.assertIn("dinner at 7", shown)
+        self.assertNotIn("booked a table", shown)
+        self.assertEqual(preview.filter_button.options.get("text"),
+                         "Show whole conversation")
+
+    def test_the_filtered_view_says_the_export_is_still_complete(self):
+        self.run_preview()
+        preview = self.search("dinner")
+        preview.toggle_filter()
+        self.assertIn("still exported", preview.text.content())
+
+    def test_toggling_back_restores_the_whole_conversation(self):
+        self.run_preview()
+        preview = self.search("dinner")
+        preview.toggle_filter()
+        preview.toggle_filter()
+        shown = preview.text.content()
+        self.assertIn("booked a table", shown)
+        self.assertIsNone(preview.filtered_term)
+
+    def test_escape_clears_the_search(self):
+        self.run_preview()
+        preview = self.search("dinner")
+        preview.toggle_filter()
+        preview._on_escape()
+        self.assertEqual(preview.search_var.get(), "")
+        self.assertIn("booked a table", preview.text.content())
+        self.assertFalse(preview.top.destroyed)
+
+    def test_escape_with_no_search_closes_the_window(self):
+        self.run_preview()
+        self.window.preview._on_escape()
+        self.assertTrue(self.window.preview.top.destroyed)
+
+    def test_exporting_from_a_filtered_view_still_writes_everything(self):
+        self.window.chosen_path = self.temp / "gui.docx"
+        self.run_preview()
+        preview = self.search("dinner")
+        preview.toggle_filter()
+        self.assertNotIn("booked a table", preview.text.content())
+
+        preview.export()
+        if self.window.worker:
+            self.window.worker.join(timeout=30)
+        self.window._drain_events()
+
+        import zipfile
+        with zipfile.ZipFile(self.temp / "gui.docx") as archive:
+            body = archive.read("word/document.xml").decode("utf-8")
+        # The filtered-out message is in the document all the same.
+        self.assertIn("booked a table", body)
+        self.assertIn("Saved 5 messages", self.window.status_var.get())
+
+    def test_the_search_only_looks_at_what_was_said(self):
+        # "Alex" labels every message, but nobody typed it; searching names
+        # would just match everything and tell you nothing.
+        self.run_preview()
+        preview = self.search("Alex")
+        self.assertIn("no matches", preview.search_status_var.get())
+        preview.toggle_filter()
+        self.assertIsNone(preview.filtered_term)
+        self.assertIn("booked a table", preview.text.content())
+
+
+class AstralTests(PreviewTests):
+    """Emoji cannot go into a Tk text widget that will be searched.
+
+    Old macOS Tk refuses them outright, and current Tk segfaults when the
+    widget it is searching holds one. Both windows swap them for a placeholder;
+    the files that get written keep the real characters.
+    """
+
+    def test_emoji_are_replaced_for_display(self):
+        from imessage_to_word.preview import ASTRAL_PLACEHOLDER
+        self.assertEqual(self.window.display("hi \U0001F604"),
+                         "hi " + ASTRAL_PLACEHOLDER)
+
+    def test_ordinary_text_is_untouched(self):
+        self.assertEqual(self.window.display("café ❤"), "café ❤")
+
+    def test_the_preview_says_when_it_has_substituted(self):
+        import sqlite3
+        conn = sqlite3.connect(str(self.db))
+        conn.execute("UPDATE message SET text = 'party \U0001F389' WHERE ROWID = 1")
+        conn.commit()
+        conn.close()
+        self.run_preview()
+        preview = self.window.preview
+        self.assertNotIn("\U0001F389", preview.text.content())
+        self.assertIn("Emoji appear as", preview.note_var.get())
+
+    def test_nothing_is_said_when_there_is_no_substitution(self):
+        import sqlite3
+        conn = sqlite3.connect(str(self.db))
+        # The fixture's only emoji is inside an archived attributedBody blob.
+        conn.execute("DELETE FROM chat_message_join WHERE message_id IN"
+                     " (SELECT ROWID FROM message WHERE attributedBody IS NOT NULL)")
+        conn.execute("DELETE FROM message WHERE attributedBody IS NOT NULL")
+        conn.commit()
+        conn.close()
+        self.run_preview()
+        self.assertEqual(self.window.preview.note_var.get(), "")
+
+    def test_the_written_files_keep_the_real_emoji(self):
+        self.window.chosen_path = self.temp / "gui.docx"
+        self.run_preview()
+        self.window.preview.export()
+        if self.window.worker:
+            self.window.worker.join(timeout=30)
+        self.window._drain_events()
+        import zipfile
+        with zipfile.ZipFile(self.temp / "gui.docx") as archive:
+            body = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("\U0001F697", body)   # the car emoji in the fixture
 
 
 class SetupCheckTests(AppTestCase):

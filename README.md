@@ -98,6 +98,17 @@ is the right conversation, **Export this to Word** writes exactly what you were
 looking at, without reading the database again. **Check setup** runs the same
 checks as `--check` and reports back in a dialog.
 
+The preview has a **Find** box. Type and every match lights up; `<` and `>`
+(or Return and Shift-Return) step through them, and the counter shows where you
+are, plus how many matches are in the part of a long conversation that isn't on
+screen. **Show only matches** narrows the view to just those messages —
+useful for "did we ever talk about the deposit?" — and says plainly that the
+export still contains everything. Cmd-F jumps to the box; Escape clears it.
+
+Search looks at what people actually said, including attachment names. It
+deliberately ignores the name labels, since searching a name in a two-person
+thread would just match every message.
+
 ### The command line
 
 Same engine, no window:
@@ -142,7 +153,15 @@ Nothing is written until you ask for it. `--preview`, and the **Preview**
 button, run exactly the same search the export runs and show you the result —
 so a preview can never disagree with the document you end up with. A long
 history previews as its beginning and its end, with a line saying how many
-messages are in between; the export always includes all of them.
+messages are in between; the export always includes all of them. Narrowing the
+preview with **Show only matches** changes what you are looking at and nothing
+else — the export is always the whole conversation.
+
+One visible compromise: emoji appear as `□` in the preview window. Tk (the
+toolkit macOS ships for Python windows) refuses characters above U+FFFF on
+older macOS, and current versions crash outright when asked to search a widget
+holding one. The preview says so when it has substituted anything. The Word
+document and the `.txt` keep the real characters.
 
 ---
 
@@ -258,9 +277,10 @@ imessage_to_word/
     models.py                   Message / Conversation types, Apple-epoch dates
     docx_writer.py              minimal Word (.docx) writer, no dependencies
     export.py                   finds the conversation, builds the document
+    preview.py                  what to show, and what a search matches
     cli.py                      command-line interface (incl. --check, --interactive)
     preflight.py                the setup checks behind --check
-tests/                          179 tests, run without a Mac or a real database
+tests/                          223 tests, run without a Mac or a real database
 ```
 
 ## Tests

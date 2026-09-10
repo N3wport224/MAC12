@@ -14,13 +14,12 @@ from .export import (
     NoMessagesFound,
     export_loaded,
     format_date_time,
-    gap_note,
     large_document_note,
     load_conversation,
     parse_date_input,
-    preview_selection,
     transcript_lines,
 )
+from .preview import gap_note, preview_selection
 
 
 def build_parser() -> argparse.ArgumentParser:

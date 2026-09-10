@@ -10,6 +10,10 @@ import sys
 import types
 
 
+class TclError(Exception):
+    """Stands in for tkinter.TclError."""
+
+
 class Variable:
     def __init__(self, master=None, value=None):
         self._value = value
@@ -19,6 +23,11 @@ class Variable:
 
     def set(self, value):
         self._value = value
+
+
+class IntVar(Variable):
+    def __init__(self, master=None, value=0):
+        super().__init__(master, value)
 
 
 class StringVar(Variable):
@@ -97,10 +106,37 @@ class Widget:
         self.inserted.append((text, tuple(tags)))
 
     def see(self, index):
-        pass
+        self.states.append(("see", index))
 
     def set(self, *args):
         pass
+
+    def index(self, spec):
+        return "1.0"
+
+    def cget(self, option):
+        return self.options.get(option, "")
+
+    def get(self, start=None, end=None):
+        return self.content()
+
+    def search(self, pattern, start, stopindex=None, nocase=False, count=None):
+        return ""            # highlighting itself is checked against real Tk
+
+    def tag_add(self, tag, start, end=None):
+        self.states.append(("tag_add", tag))
+
+    def tag_remove(self, tag, start, end=None):
+        pass
+
+    def tag_raise(self, tag, above=None):
+        pass
+
+    def delete(self, start, end=None):
+        self.inserted = []
+
+    def select_range(self, start, end):
+        self.states.append("selected")
 
     def yview(self, *args):
         pass
@@ -171,6 +207,7 @@ def install():
     Toplevel.instances = []
     for name, value in [("Tk", Tk), ("Toplevel", Toplevel), ("Text", Widget),
                         ("StringVar", StringVar), ("BooleanVar", BooleanVar),
+                        ("IntVar", IntVar), ("TclError", TclError),
                         ("Variable", Variable), ("Frame", Widget), ("Label", Widget),
                         ("Entry", Widget), ("Button", Widget)]:
         setattr(tkinter, name, value)
