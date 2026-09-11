@@ -96,9 +96,12 @@ You should end up with something like `Python 3.9.6`. Any version starting with
 python3 -m imessage_to_word --check
 ```
 
-This checks the six things that decide whether an export will work. The first
-time, expect it to fail on **Full Disk Access** — that is normal, and Step 6
-fixes it.
+This checks everything that has to be true for an export to work, and finishes
+by doing a complete test export against a small conversation it invents — so
+you know the machinery works on your Mac before it touches your messages.
+
+The first time, expect it to fail on **Full Disk Access**. That is normal, and
+Step 6 fixes it. Everything else should already say `[ ok ]`.
 
 If it says `No module named imessage_to_word`, you are in the wrong folder. Go
 back to Step 3.

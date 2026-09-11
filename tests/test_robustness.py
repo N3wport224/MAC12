@@ -10,6 +10,11 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import docx as python_docx      # optional: a second opinion on our output
+except ImportError:
+    python_docx = None
+
 from imessage_to_word import phones
 from imessage_to_word.attributed_body import clean_text
 from imessage_to_word.export import (
@@ -67,9 +72,11 @@ class BadDataTests(unittest.TestCase):
         with zipfile.ZipFile(result.path) as archive:
             body = archive.read("word/document.xml").decode("utf-8")
         self.assertIn("&lt;/w:t&gt;", body)
-        import docx
-        text = "\n".join(p.text for p in docx.Document(str(result.path)).paragraphs)
-        self.assertIn("</w:t></w:r>", text)
+        if python_docx:
+            text = "\n".join(
+                paragraph.text
+                for paragraph in python_docx.Document(str(result.path)).paragraphs)
+            self.assertIn("</w:t></w:r>", text)
 
     def test_a_database_with_no_attachment_tables_still_exports(self):
         conn = sqlite3.connect(str(self.db))

@@ -22,11 +22,15 @@ cd /path/to/this/folder
 python3 -m imessage_to_word --check
 ```
 
-That checks the six things that decide whether an export will work: your Python
+That checks everything that decides whether an export will work: your Python
 version, whether a window can open, whether macOS is letting you read the
-Messages database, free disk space, that your history is actually on this Mac,
-and that a test Word file can be written. Anything marked `[FAIL]` comes with
-the fix next to it. Run it again until it says **Ready.**
+Messages database, free disk space, and that your history is actually on this
+Mac. It finishes by running a complete export against a two-message
+conversation it makes up on the spot — reading SQLite, decoding an archived
+message, writing the Word file and the text copy, and reading both back — so
+the whole pipeline is proven on your machine before you point it at anything
+real. Anything marked `[FAIL]` comes with the fix next to it. Run it again
+until it says **Ready.**
 
 Then find the exact number Messages has for the person:
 

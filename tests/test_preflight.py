@@ -22,7 +22,7 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse([c for c in checks if c.status == preflight.FAIL],
                          preflight.report(checks))
         self.assertEqual(statuses(checks)["Full Disk Access"], preflight.OK)
-        self.assertEqual(statuses(checks)["Word document writer"], preflight.OK)
+        self.assertEqual(statuses(checks)["End-to-end self test"], preflight.OK)
 
     def test_the_message_count_is_reported(self):
         history = [c for c in preflight.run_checks(self.db) if c.name == "Message history"]
@@ -72,10 +72,36 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(check.status, preflight.WARN)
         self.assertIn("imessage_to_word", check.detail)
 
-    def test_word_writer_self_test_actually_builds_a_file(self):
-        check = preflight._check_word_writer()
-        self.assertEqual(check.status, preflight.OK)
-        self.assertIn("bytes", check.detail)
+    def test_the_self_test_runs_a_whole_export(self):
+        check = preflight._check_end_to_end()
+        self.assertEqual(check.status, preflight.OK, check.detail)
+        self.assertIn("Word and text", check.detail)
+
+    def test_the_self_test_decodes_an_archived_message(self):
+        # The second message has no text column, only an attributedBody blob,
+        # which is how recent macOS stores things.
+        from imessage_to_word.attributed_body import decode_attributed_body
+        blob = preflight._self_test_body(preflight.SELF_TEST_LINES[1])
+        self.assertEqual(decode_attributed_body(blob), preflight.SELF_TEST_LINES[1])
+
+    def test_the_self_test_fails_loudly_if_the_export_breaks(self):
+        from imessage_to_word import export as export_module
+        with mock.patch.object(export_module, "export_to_word",
+                               side_effect=RuntimeError("writer is broken")):
+            check = preflight._check_end_to_end()
+        self.assertEqual(check.status, preflight.FAIL)
+        self.assertIn("writer is broken", check.detail)
+
+    def test_the_self_test_tidies_up_after_itself(self):
+        import glob
+        before = set(glob.glob(tempfile.gettempdir() + "/imessage-selftest-*"))
+        preflight._check_end_to_end()
+        after = set(glob.glob(tempfile.gettempdir() + "/imessage-selftest-*"))
+        self.assertEqual(after - before, set())
+
+    def test_the_self_test_appears_in_the_report(self):
+        checks = preflight.run_checks(self.db)
+        self.assertIn("End-to-end self test", statuses(checks))
 
 
 if __name__ == "__main__":

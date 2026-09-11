@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import chatdb, contacts
-from .docx_writer import Document, Run
 from .export import default_output_path
 
 OK = "ok"
@@ -152,22 +151,99 @@ def _check_output_folder() -> Check:
     return Check("Save folder", OK, str(folder))
 
 
-def _check_word_writer() -> Check:
+SELF_TEST_SCHEMA = """
+CREATE TABLE handle (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, service TEXT);
+CREATE TABLE chat (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, guid TEXT, style INTEGER,
+                   chat_identifier TEXT, service_name TEXT, display_name TEXT);
+CREATE TABLE message (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, guid TEXT, text TEXT,
+                      handle_id INTEGER, service TEXT, date INTEGER,
+                      is_from_me INTEGER, attributedBody BLOB);
+CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+"""
+
+SELF_TEST_NUMBER = "+15550100001"
+SELF_TEST_LINES = ("Self test: a message received.", "Self test: a message sent.")
+
+
+def _self_test_body(text: str) -> bytes:
+    """The archived form newer macOS stores message text in."""
+    payload = text.encode("utf-8")
+    length = (bytes([len(payload)]) if len(payload) < 0x81
+              else b"\x81" + len(payload).to_bytes(2, "little"))
+    return (b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84"
+            b"\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84"
+            b"\x84\x08NSString\x01\x94\x84\x01+" + length + payload + b"\x86\x84\x02iI\x01")
+
+
+def _build_self_test_db(path: Path) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(SELF_TEST_SCHEMA)
+        conn.execute("INSERT INTO handle (id, service) VALUES (?, 'iMessage')",
+                     (SELF_TEST_NUMBER,))
+        conn.execute("INSERT INTO chat (guid, style, chat_identifier, service_name,"
+                     " display_name) VALUES ('s', 45, ?, 'iMessage', '')",
+                     (SELF_TEST_NUMBER,))
+        conn.execute("INSERT INTO chat_handle_join VALUES (1, 1)")
+        # 2026-01-01 12:00 UTC, in the nanosecond form macOS uses.
+        when = 788961600 * 1_000_000_000
+        # One plain message, one stored the modern archived way.
+        conn.execute("INSERT INTO message (guid, text, handle_id, service, date,"
+                     " is_from_me, attributedBody) VALUES ('a', ?, 1, 'iMessage', ?, 0, NULL)",
+                     (SELF_TEST_LINES[0], when))
+        conn.execute("INSERT INTO message (guid, text, handle_id, service, date,"
+                     " is_from_me, attributedBody) VALUES ('b', NULL, 1, 'iMessage', ?, 1, ?)",
+                     (when + 60 * 1_000_000_000, _self_test_body(SELF_TEST_LINES[1])))
+        conn.execute("INSERT INTO chat_message_join VALUES (1, 1)")
+        conn.execute("INSERT INTO chat_message_join VALUES (1, 2)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _check_end_to_end() -> Check:
+    """Run a complete export against a database we make up on the spot.
+
+    This exercises the whole path -- reading SQLite, decoding archived message
+    text, building the Word file, writing the text copy -- on this Mac, without
+    needing any permission or touching real messages.
+    """
+    from .export import ExportOptions, export_to_word
+
     temp_dir = Path(tempfile.mkdtemp(prefix="imessage-selftest-"))
     try:
-        document = Document(title="Self test")
-        document.add_paragraph([Run("Self test", bold=True)])
-        path = document.save(temp_dir / "selftest.docx")
+        database = temp_dir / "chat.db"
+        _build_self_test_db(database)
+        result = export_to_word(
+            ExportOptions(number=SELF_TEST_NUMBER, their_name="Self Test",
+                          my_name="Me", db_path=database, lookup_contact_name=False,
+                          link_contact_handles=False, also_text=True),
+            output_path=temp_dir / "selftest.docx",
+        )
+
         import zipfile
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(result.path) as archive:
             broken = archive.testzip()
+            body = archive.read("word/document.xml").decode("utf-8")
         if broken:
-            return Check("Word document writer", FAIL, "Bad entry: {}".format(broken))
-        return Check("Word document writer", OK,
-                     "wrote and verified a test .docx ({} bytes)".format(
-                         path.stat().st_size))
+            return Check("End-to-end self test", FAIL,
+                         "The Word file came out damaged: {}".format(broken))
+
+        missing = [line for line in SELF_TEST_LINES if line not in body]
+        if missing or result.message_count != 2:
+            return Check("End-to-end self test", FAIL,
+                         "Exported {} of 2 messages; missing: {}".format(
+                             result.message_count, missing or "nothing"))
+        transcript = result.text_path.read_text(encoding="utf-8")
+        if SELF_TEST_LINES[0] not in transcript:
+            return Check("End-to-end self test", FAIL,
+                         "The plain-text copy came out wrong.")
+        return Check("End-to-end self test", OK,
+                     "exported a two-message test conversation to Word and text, "
+                     "and read both back ({} bytes)".format(result.path.stat().st_size))
     except Exception as error:  # pragma: no cover - defensive
-        return Check("Word document writer", FAIL, "{}: {}".format(
+        return Check("End-to-end self test", FAIL, "{}: {}".format(
             type(error).__name__, error))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -178,7 +254,7 @@ def run_checks(db_path: Optional[Path] = None) -> List[Check]:
     checks.extend(_check_database(db_path))
     checks.append(_check_contacts())
     checks.append(_check_output_folder())
-    checks.append(_check_word_writer())
+    checks.append(_check_end_to_end())
     return checks
 
 
