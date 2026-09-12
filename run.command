@@ -2,14 +2,15 @@
 # Double-click this in Finder to open the app.
 cd "$(dirname "$0")" || exit 1
 
-# Prefer a python3 that can actually open a window (i.e. one with Tkinter).
+# Prefer a python3 that can actually open a window. Importing tkinter is not
+# enough: a Tk built for a newer macOS than this one aborts when it starts.
 PYTHON=""
 FALLBACK=""
 for candidate in /usr/local/bin/python3 /opt/homebrew/bin/python3 \
                  "$(command -v python3 2>/dev/null)" /usr/bin/python3; do
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
     [ -z "$FALLBACK" ] && FALLBACK="$candidate"
-    if "$candidate" -c 'import tkinter' >/dev/null 2>&1; then
+    if "$candidate" -c 'import tkinter; tkinter.Tk().destroy()' >/dev/null 2>&1; then
         PYTHON="$candidate"
         break
     fi

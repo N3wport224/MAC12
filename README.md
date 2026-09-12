@@ -46,9 +46,16 @@ python3 -m imessage_to_word "+15551234567" --preview
 
 And export:
 
+The window:
+
 ```bash
-python3 app.py                   # the window
-python3 -m imessage_to_word "+15551234567" --text --open   # or the command line
+python3 app.py
+```
+
+Or the command line:
+
+```bash
+python3 -m imessage_to_word "+15551234567" --text --open
 ```
 
 ---
@@ -121,28 +128,43 @@ thread would just match every message.
 
 Same engine, no window:
 
+Check this Mac is ready, then see which handles Messages actually has:
+
 ```bash
-# Check this Mac is ready
 python3 -m imessage_to_word --check
-
-# See which handles Messages actually has
 python3 -m imessage_to_word --list
+```
 
-# Look at it first; this writes nothing
-python3 -m imessage_to_word "+1 555 123 4567" --preview        # first 40 messages
-python3 -m imessage_to_word "+1 555 123 4567" --preview 200    # first and last 100
-python3 -m imessage_to_word "+1 555 123 4567" --preview 0      # the whole thing
+Look at a conversation first — this writes nothing. The number is how many
+messages to show (`0` shows all of them):
 
-# Export a conversation, with a plain-text copy, and open it
+```bash
+python3 -m imessage_to_word "+1 555 123 4567" --preview
+python3 -m imessage_to_word "+1 555 123 4567" --preview 200
+python3 -m imessage_to_word "+1 555 123 4567" --preview 0
+```
+
+Export it, with a plain-text copy, and open the result:
+
+```bash
 python3 -m imessage_to_word "+1 555 123 4567" --name "Alex" --me "Andrew" --text --open
+```
 
-# A date range, group chats included, to a specific file
-python3 -m imessage_to_word 5551234567 --from 2025-01-01 --to 2025-12-31 \
-    --groups -o ~/Desktop/alex-2025.docx
+A date range, group chats included, written to a file you choose:
 
-# No flags to remember: it asks for what it needs
+```bash
+python3 -m imessage_to_word 5551234567 --from 2025-01-01 --to 2025-12-31 --groups -o ~/Desktop/alex-2025.docx
+```
+
+No flags to remember — it asks for what it needs:
+
+```bash
 python3 -m imessage_to_word --interactive
 ```
+
+> Every block above is meant to be pasted as-is. Terminal's zsh does not treat
+> `#` as a comment, so a line with a note after it fails — which is why there
+> are none here.
 
 `python3 -m imessage_to_word --help` lists every option. The less obvious ones:
 `--preview [N]` (show it instead of exporting; `0` shows everything),

@@ -387,6 +387,58 @@ class AstralTests(PreviewTests):
         self.assertIn("\U0001F697", body)   # the car emoji in the fixture
 
 
+class TkProbeTests(AppTestCase):
+    """A Tk built for a newer macOS aborts the process instead of raising."""
+
+    def test_a_python_that_does_not_exist_is_not_usable(self):
+        usable, complaint = self.app_module.tk_works("/nowhere/python3")
+        self.assertFalse(usable)
+        self.assertEqual(complaint, "")
+
+    def test_a_python_whose_tk_aborts_is_not_usable(self):
+        # os.abort() imitates the real failure: no exception, just a dead
+        # process, which is why the check has to run out of process.
+        import sys
+        script = self.temp / "aborting-python"
+        script.write_text(
+            "#!/bin/sh\n"
+            "echo 'macOS 13 (1307) or later required, have instead 13 (1306) !' >&2\n"
+            "exit 134\n")
+        script.chmod(0o755)
+        usable, complaint = self.app_module.tk_works(str(script))
+        self.assertFalse(usable)
+        self.assertIn("macOS 13", complaint)
+
+    def test_this_python_is_tried_first(self):
+        import sys
+        candidates = self.app_module.python_candidates()
+        self.assertEqual(candidates[0], sys.executable)
+
+    def test_candidates_are_real_paths_without_repeats(self):
+        import os
+        candidates = self.app_module.python_candidates()
+        self.assertEqual(len(candidates), len(set(candidates)))
+        self.assertTrue(all(os.path.exists(path) for path in candidates))
+
+    def test_a_working_tk_means_no_relaunch(self):
+        from unittest import mock
+        with mock.patch.object(self.app_module, "tk_works", return_value=(True, "")):
+            with mock.patch.object(self.app_module.os, "execve") as execve:
+                self.app_module.ensure_a_usable_tk()
+        execve.assert_not_called()
+
+    def test_no_usable_tk_hands_over_to_the_question_and_answer_version(self):
+        from unittest import mock
+        with mock.patch.object(self.app_module, "tk_works", return_value=(False, "boom")):
+            with mock.patch.object(self.app_module, "python_candidates",
+                                   return_value=["/only/one"]):
+                with mock.patch("imessage_to_word.cli.main", return_value=3) as cli:
+                    with self.assertRaises(SystemExit) as caught:
+                        self.app_module.ensure_a_usable_tk()
+        self.assertEqual(caught.exception.code, 3)
+        cli.assert_called_once_with(["--interactive"])
+
+
 class SetupCheckTests(AppTestCase):
     def run_check(self):
         self.window.start_check()

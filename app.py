@@ -8,11 +8,78 @@ Run it with:  python3 app.py
 """
 from __future__ import annotations
 
+import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
+
+# --- making sure this Python can actually open a window ---------------------
+#
+# Tk does not always fail politely. A Python whose Tk was built for a newer
+# macOS than the one it is running on aborts the whole process ("macOS 13
+# (1307) or later required..."), which no try/except can catch. So before this
+# file imports tkinter at all, a throwaway subprocess finds out whether Tk
+# starts -- and if this Python cannot, another one on the Mac probably can.
+
+TK_PROBE = "import tkinter; tkinter.Tk().destroy()"
+RELAUNCH_FLAG = "IMESSAGE_TO_WORD_RELAUNCHED"
+
+
+def tk_works(python: str):
+    """Returns (usable, whatever Tk complained about)."""
+    try:
+        finished = subprocess.run(
+            [python, "-c", TK_PROBE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    return finished.returncode == 0, finished.stderr.decode("utf-8", "replace").strip()
+
+
+def python_candidates():
+    """Every python3 worth trying, this one first, without repeats."""
+    found = []
+    for candidate in (sys.executable, shutil.which("python3"), "/usr/bin/python3",
+                      "/usr/local/bin/python3", "/opt/homebrew/bin/python3"):
+        if candidate and candidate not in found and os.path.exists(candidate):
+            found.append(candidate)
+    return found
+
+
+def ensure_a_usable_tk() -> None:
+    """Re-launch under a Python whose Tk works, or fall back to questions."""
+    if os.environ.get(RELAUNCH_FLAG):
+        return
+    usable, complaint = tk_works(sys.executable)
+    if usable:
+        return
+
+    for candidate in python_candidates()[1:]:
+        if tk_works(candidate)[0]:
+            print("This Python cannot open a window, so the app is starting "
+                  "again with {}.\n".format(candidate))
+            sys.stdout.flush()          # execve would discard anything buffered
+            environment = dict(os.environ, **{RELAUNCH_FLAG: "1"})
+            try:
+                os.execve(candidate, [candidate, os.path.abspath(__file__)], environment)
+            except OSError:
+                pass
+
+    print("No Python on this Mac can open a window right now, so here is the "
+          "same thing as a set of questions instead.")
+    if complaint:
+        print("\n(What went wrong: {})".format(complaint.splitlines()[-1]))
+    print()
+    from imessage_to_word.cli import main as run_cli
+    raise SystemExit(run_cli(["--interactive"]))
+
+
+if __name__ == "__main__":
+    ensure_a_usable_tk()
 
 try:
     import tkinter as tk
@@ -20,8 +87,9 @@ try:
 except ImportError:  # pragma: no cover - depends on the Python install
     sys.stderr.write(
         "This app needs Tkinter, which the Mac's built-in python3 includes.\n"
-        "If you are using a Python without it, run the command-line version:\n"
-        '  python3 -m imessage_to_word "+15551234567"\n'
+        "If you are using a Python without it, run the question-and-answer\n"
+        "version, which needs no window:\n"
+        "  python3 -m imessage_to_word --interactive\n"
     )
     raise SystemExit(1)
 
