@@ -396,9 +396,8 @@ class TkProbeTests(AppTestCase):
         self.assertEqual(complaint, "")
 
     def test_a_python_whose_tk_aborts_is_not_usable(self):
-        # os.abort() imitates the real failure: no exception, just a dead
-        # process, which is why the check has to run out of process.
-        import sys
+        # Imitates the real failure: no exception, just a dead process,
+        # which is why the check has to run out of process.
         script = self.temp / "aborting-python"
         script.write_text(
             "#!/bin/sh\n"
